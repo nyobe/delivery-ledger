@@ -1210,7 +1210,8 @@ JS = """
     try { localStorage.setItem('ledger.asof', id); } catch (e) {}
   }
   buttons.forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.asof); }); });
-  var initial = buttons[0] && buttons[0].dataset.asof;
+  var pressed = document.querySelector('nav.snaps button[aria-pressed="true"]') || buttons[0];
+  var initial = pressed && pressed.dataset.asof;
   try { var saved = localStorage.getItem('ledger.asof'); if (saved && document.querySelector('.snapshot[data-asof="' + saved + '"]')) initial = saved; } catch (e) {}
   if (initial) show(initial);
 })();
@@ -1218,12 +1219,15 @@ JS = """
 
 
 def render_page(facts, snapshots, page):
+    # The first snapshot is the primary (shown on load, and the masthead clock);
+    # the switcher lists them all in ledger order.
+    primary = snapshots[0][0]
     snap_html, buttons = [], []
-    for i, (as_of, caption) in enumerate(snapshots):
+    for as_of, caption in sorted(snapshots):
         db = build_db(facts, as_of)
         body = "".join(fn(db, as_of) for fn in SCREENS)
-        snap_html.append(f'<div class="snapshot" data-asof="{esc(as_of)}"{"" if i == 0 else " hidden"}>{body}</div>')
-        buttons.append(f'<button type="button" data-asof="{esc(as_of)}" aria-pressed="{"true" if i == 0 else "false"}">'
+        snap_html.append(f'<div class="snapshot" data-asof="{esc(as_of)}"{"" if as_of == primary else " hidden"}>{body}</div>')
+        buttons.append(f'<button type="button" data-asof="{esc(as_of)}" aria-pressed="{"true" if as_of == primary else "false"}">'
                        f'{esc(caption)}<span class="t">{esc(as_of)}</span></button>')
     return f"""<title>{esc(page["title"])}</title>
 <meta name="description" content="{esc(page["description"])}">
