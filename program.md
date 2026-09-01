@@ -88,6 +88,58 @@ each term names. The five term types in use — `verified`, `carried`,
 `approved`, `not_held`, `plan_safe_or_approved` — are the vocabulary a gate
 language needs first.
 
+## Two programs, no Uber program
+
+The multistack scenario is two of these, owned by two teams, with the edges
+between them declared on the consumer. Sketch of the payments side; the
+platform side is the same shape with two stacks per stage and no cross-team
+inputs.
+
+```ts
+export default d.program("payments", {
+  warehouse: d.warehouse.ociBuild({ repo: "acme/payments", branch: "main",
+    images: ["payments-api"], stacks: ["payments"],
+    config: d.esc("acme/payments") }),           // base_image_version is pinned here
+
+  stages: {
+    dev:     d.stage({ environment: "dev",     upstream: "warehouse", promote: d.auto() }),
+    staging: d.stage({ environment: "staging", upstream: "dev",
+                       promote: d.auto({ requires: [d.verified("dev", "integration")] }) }),
+    prod:    d.stage({ environment: "prod",    upstream: "staging",
+                       promote: d.gated({ requires: [d.verified("staging", "integration"),
+                                                     d.verified("staging", "canary"),
+                                                     d.approved({ role: "payments-oncall" })] }) }),
+  },
+
+  // Bindings are patterns: declared once, instantiated per environment.
+  bindings: [
+    // by reference: a per-stage record, taken up under this edge's own policy
+    d.bind({ key: "cluster_endpoint", from: d.outputs("platform", "cluster"),   // platform's cluster stack, same environment
+             uptake: { dev: d.auto(),
+                       staging: d.autoIfSafe({ safe: d.preview(p => p.delete == 0 && p.replace == 0),
+                                               else: d.approved({ role: "payments-oncall" }) }),
+                       prod: d.gated({ requires: [d.notHeld(), d.approved({ role: "payments-oncall" })] }) } }),
+    // by version: a pin in our config; the bump PR is the uptake and it rides our train
+    d.bind({ key: "base_image_version", from: d.record("platform-images"), kind: "by-version",
+             uptake: d.autoWithChecks() }),
+  ],
+});
+```
+
+The per-environment expansion is done by the program apply, not by SQL:
+each instance edge cites its pattern (`pattern:` in the payload), and the
+views read instances only. The uptake policy on a by-reference edge is the
+same term vocabulary as a stage gate; on a by-version edge there is nothing
+to gate at the edge — the consumer's stages gate the freight that carries
+the pin.
+
+A pin-set is written by whoever proposes it, not by either program:
+
+```
+pulumi delivery pin k8s-1.31 --member platform=P12 --member payments=A231 --order platform,payments \
+  --because "1.31 rotates the OIDC issuer; A231 carries the issuer-aware auth lib"
+```
+
 ## What writes what
 
 | who | when | writes (class · kind · subject) |
@@ -95,7 +147,7 @@ language needs first.
 | **program apply** | `pulumi up` on the delivery program (a re-apply that changes nothing writes nothing) | intent · `warehouse.declared` · `warehouse:<name>` |
 | | | intent · `stage.declared` · `stage:<s>` — with the annotations as payload (view configuration: URLs, owner, Slack) |
 | | | intent · `policy.declared` · `stage:<s>` — mode, trigger, structured `terms`, and the rule rendered from them |
-| | | intent · `binding.declared` · `edge:<consumer><-<producer>.<key>` — with its uptake policy |
+| | | intent · `binding.declared` · `edge:<consumer><-<producer>.<key>` — the pattern (`role: pattern`), and one instance per environment citing it, with kind (by-reference \| by-version), uptake mode and structured `terms` |
 | **warehouse** | a master build completes | observation · `freight.discovered` · `freight:<F>` — digests, config version, source SHA, the PRs this build introduced |
 | **release cron / button** | 15:00 UTC weekdays, or "Cut release" | intent · `release.cut` · `freight:<F>` — the train nominates a freight |
 | **policy engine** | on any fact that could satisfy a stage's terms, or its trigger | intent · `promotion.decided` · `stage:<s>` — actor `policy:<s>`, `refs` = the facts that satisfied the terms |
@@ -103,10 +155,13 @@ language needs first.
 | **a person** | merges the release PR / runs `delivery approve` | intent · `approval.granted` · `stage:<s>` — role, via, rationale |
 | **a person** | `delivery hold production-eu --until …` | intent · `hold.placed` · `stage:<s>` — expiry in payload |
 | **a person, side door** | does something out of band and says so | intent · `breakglass.recorded` · `stage:<s>` — scope, action, from/to, incident, expiry |
-| **a person** | takes up a published record on a gated edge | intent · `uptake.decided` · `edge:<…>` — record version |
+| **a person** | takes up a published record on a gated edge, or approves one | intent · `uptake.decided` / `approval.granted` · `edge:<…>` — record version, role |
+| **a bot's PR merge** | the bump PR for a by-version pin lands | intent · `uptake.decided` · `edge:<…>` — record version, the PR; the next `freight.discovered` carries the pin in its config |
+| **whoever proposes a release across programs** | `pulumi delivery pin …` | intent · `release.pinned` · `release:<name>` — one member freight per program, an order, a reason |
 | **executor** | starts / progresses / finishes an enactment | observation · `transition.started` / `.phase` / `.finished` · `transition:<T>` — outcome `succeeded`, `failed` (with step and error), or `abandoned` (refs the superseding decision); `resource.step` at whatever grain the executor emits |
 | **verification watch** | an external check concludes | observation · `verification.recorded` · `stage:<s>` — freight, check, outcome |
 | **planner** | a preview runs (on candidacy, or ahead of it) | observation · `plan.summarized` · `stage:<s>` — counts, migrations touched, baseline |
+| **planner** | a hyper-preview: the consumer against a proposed record | observation · `plan.summarized` · `stage:<s>` — with `against_record: {producer, version}`; read by the edge's `plan_safe_or_approved` term, never by the stage gate |
 | **producer enactment** | a stack publishes outputs | observation · `output.published` · `record:<producer>` — versioned |
 | **conformance watch** | on cadence | observation · `state.observed` · `stage:<s>` — what is actually running |
 | **side jobs** | sentry marker, PR notifications | observation · `job.finished` · `stage:<s>` — with `optional` (see smells.md: that flag is really the program's to declare) |

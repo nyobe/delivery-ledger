@@ -2,9 +2,11 @@
 
 A fixture-driven slice of the ledger + tracker half of Delivery as Code:
 one append-only table of attributed facts, and a release tracker that is
-nothing but queries over it. The scenario is pulumi-service's own weekday
-release train, so the people who run that pipeline can check it against
-what they know.
+nothing but queries over it. Two scenarios render through the same views:
+pulumi-service's own weekday release train, so the people who run that
+pipeline can check it against what they know; and an invented two-team
+estate — a platform program and a payments program with declared bindings
+between them — so the multi-program mechanics have somewhere to bite.
 
 Companion to the sketch in Claire's notebook
 (`projects/delivery-as-code/poc-ledger-tracker.md`) and the thesis pair
@@ -19,9 +21,21 @@ subjects × intent/observation facts × promotion × freight.
 ./render.py --scenario <name>              # another directory under scenarios/
 ./render.py --lint-only
 ./render.py --as-of 2026-08-24T16:20:00Z   # the ledger as it stood at that instant
+./render.py --pure                         # views evaluated on demand (slow); must render the same page
 ```
 
 Python 3 and its bundled sqlite3; no dependencies. Open `out/<scenario>/index.html`.
+
+The views are the product; whether each one is evaluated on demand or
+materialised once per build is a rendering choice. By default `render.py`
+materialises every view in file order (views.sql is layered bottom-up), so
+each layer is computed once from the one below instead of being re-derived
+inside every correlated subquery above it — a full run of either scenario
+takes well under a second. `--pure` keeps them as views: on pulumi-service it
+renders the same page byte for byte (the check that nothing depends on the
+materialisation); on multistack the trace views nest deeply enough to exceed
+SQLite's limit on table references per statement, which is the sharper
+statement of the same point (smells.md #18).
 
 ## What is in here
 
@@ -31,7 +45,7 @@ Python 3 and its bundled sqlite3; no dependencies. Open `out/<scenario>/index.ht
 | `views.sql` | every screen as a view: subjects → current state → gate terms → grid, lanes, trace, uptake, releases, audit — shared by every scenario |
 | `render.py` | lint → self-checks (including mutation checks) → HTML; holds no state of its own |
 | `scenarios/<name>/fixture.py` | a scenario as a timeline; emits `facts.jsonl` beside it so one story can't drift into two |
-| `scenarios/<name>/facts.jsonl` | the ledger for that scenario (pulumi-service: 132 facts across two weeks of the pipeline) |
+| `scenarios/<name>/facts.jsonl` | the ledger for that scenario (pulumi-service: 132 facts across two weeks; multistack: 143 facts across two programs) |
 | `scenarios/<name>/scenario.py` | the scenario's page chrome, snapshot instants, and self-checks |
 | `program.md` | the authoring side: what a delivery program *declares*, and which facts each declaration writes |
 | `smells.md` | the acceptance log: anywhere a view wanted state the ledger doesn't hold, and what the slice taught |
@@ -62,6 +76,58 @@ transition (phase facts, resource steps, a failure with its step, an
 abandonment citing the decision that superseded it), a decision audit, and
 the ledger tail with every fact id linkable.
 
+## The second scenario: two programs, no Uber program
+
+`scenarios/multistack` is a platform program (stacks `network` and
+`cluster`, team platform-eng) and a payments program (one stack, team
+payments), each with its own dev → staging → prod, and no program that owns
+the whole graph. Its story is a Kubernetes 1.31 upgrade that has to ship as
+a pin-set across both teams. It adds, over the same views:
+
+- **The estate** — programs × environments, assembled by joining each
+  team's own stages on `environment`; each cell shows what the stage
+  carries and what it is *wired with* (the version vector of records its
+  by-reference edges have taken up).
+- **Carried per (stage, stack)** — a stage carries a freight only when
+  every stack its freight enacts does; between the network leg and the
+  cluster leg the grid says `partial` with the per-stack detail, and a
+  verification recorded in that window does not satisfy a downstream gate.
+- **Both binding kinds, side by side.** Bindings are declared once per
+  program as a pattern and instantiated per environment. A *by-reference*
+  edge carries a per-stage record with its own uptake policy — typed terms
+  on the edge, the same vocabulary as a stage gate — automatic within the
+  platform team, and for payments ← cluster: auto in dev, auto-if-safe in
+  staging, gated in prod. A *by-version* edge is a pin in the consumer's
+  config: the platform bake publishes a base image, a bot PR bumps the pin
+  and auto-merges on green checks, and the pin rides the payments train
+  through every stage's ordinary gates (the real AMI shape from the first
+  slice's review). "Pending" on a by-version edge means published but not
+  pinned; where the pin has got to is a lanes question.
+- **The hyper-preview as a fact** — the consumer's plan against a proposed
+  record (`plan.summarized` with `against_record`), so an auto-if-safe
+  uptake is evaluable at rest exactly as the diff-gate is. In staging the
+  issuer rotation shows as a provider replace, is not safe, and waits for
+  payments oncall; in prod the same preview sits behind an approval term.
+- **A pin-set** — one `release.pinned` fact naming a member freight per
+  program. It has no enactment of its own: each member moves under its
+  owning team's policy, and the pin-set's state per environment is a join
+  over the members' lanes.
+- **Impact as a queue** — everything downstream of a producer along
+  declared edges, transitively (network → cluster → payments), each hop
+  with its uptake state right now.
+- An uptake-decision audit mirroring the promotion one; a failed cluster
+  leg retried by the executor against the standing decision (no second
+  decision, nothing for the audit to flag).
+
+Everything in it is illustrative: teams, stacks, PR numbers, timings and
+error texts are invented to exercise the mechanism, not taken from a real
+pipeline. The *shapes* come from the notebook's record: Tyler's VPC →
+cluster → app split with no shared program and his "what's affected
+downstream" question (log 2026-08-27-field-updates); the second customer's
+"different resources have different lifecycles and different governance"
+criterion for subject boundaries; Moderna's hyper-preview; and the
+by-version AMI path the first slice's review surfaced (smells.md #17).
+
 The page carries five snapshots of the same ledger: Wed 17:45 (F418 waiting
 on oncall; production drifted since Monday night); Mon 16:20 (F417
 mid-rollout, both versions live); Mon 16:50 (the EU diff-gate holding F417);
@@ -87,7 +153,13 @@ the blocker's own onset — a hold's placement, a plan's timestamp) as when
 the wait began. The human-readable `rule` on each policy is rendered from the
 same terms by `fixture.py`, so text and evaluation can't disagree. These five
 term types are, concretely, the vocabulary a gate-expression language would
-need (architecture OPEN 4).
+need (architecture OPEN 4). Edges carry the same terms for
+their uptake gate (`v_uptake_term`), evaluated against the latest published
+record: `approved` is an approval on the edge for that record version,
+`plan_safe_or_approved` reads the hyper-preview, `not_held` reads the
+consumer stage. `verified` and `carried` name a stage and a freight, which
+an uptake has neither of — on an edge they are undefined, and the view says
+so rather than passing them.
 
 ## Discipline the fixture is held to
 
@@ -104,16 +176,22 @@ need (architecture OPEN 4).
   `awaiting`/`drifted`/`converged`/`held`/`superseded` values anywhere;
 - every policy-written promotion decision passed its gate at the instant it
   was written (the ledger rebuilt at each decision's own timestamp);
-- 60 self-checks pass, each pinning something a view must *include and
-  exclude* at one of ten instants — and eleven of them are **mutation
-  checks**: the fixture is altered in memory (a verification moved before
+- the scenario's self-checks pass (60 for pulumi-service, 58 for
+  multistack), each pinning something a view must *include and exclude* at
+  one instant — and eleven (ten) of them are **mutation checks**. For
+  pulumi-service: the fixture is altered in memory (a verification moved before
   its deployment; a verification for a freight the stage never carried; an
   approval by the wrong role; a decision written by a person; an approval
   deleted and its ref stripped, on a gated stage and on an auto-if-safe
   stage; a second approval term added to a policy; a second active hold; a
   duplicate approval; the break-glass fact removed; a verification flipped
-  to fail) and the views must say so. A SELECT cannot stay green with its
-  mechanism broken.
+  to fail) and the views must say so. For multistack: a staging verification
+  recorded between the network leg and the retried cluster leg; an uptake
+  with its approval deleted, or written by a person, or approved by the
+  wrong role; a preview flipped to safe; a hold on the consumer stage; the
+  within-team auto uptake removed; the prod cluster leg left open; the pin
+  removed from every freight; a payments build attributed to the platform
+  warehouse. A SELECT cannot stay green with its mechanism broken.
 
 The scenario keeps one figure in one place: the timeline in `fixture.py`
 writes each timestamp once; counts and states in the page are derived.
@@ -152,7 +230,8 @@ two of these — it still describes production-eu following production, and a
 `release/staging@…` branch format — so a reader checking the fixture against
 the runbook alone will find the runbook, not the fixture, out of date.
 
-Illustrative, i.e. the thesis's construct rather than today's pipeline:
+Illustrative, i.e. the thesis's construct rather than today's pipeline
+(the multistack scenario is illustrative throughout — see above):
 
 - **production-eu as a sequential, auto-if-safe follower of production.**
   Since 2026-07-14 `push-build.yml` deploys production and production-eu
@@ -230,8 +309,9 @@ No pump, no executors, no engine changes (Tyler's and Florian's lanes). No
 ingest — the facts are generated from a hand-written timeline; the cheapest
 real ingest (Tyler's POC events, deployment webhooks, or a watch over
 GitHub) is a later layer. Real output-record publication is blocked on the
-ESC pulumi-stacks provenance edge, so the two worker-pool records stand in.
-One program, one freight lane: the multi-stack, multi-team case (a platform
-program publishing to an app program's stages; pin-set releases) is the next
-scenario, not this one. Tables, not chrome: the grid vocabulary (glyph +
-colour, never colour alone) is borrowed from Vic's DeliveryUX plan.
+ESC pulumi-stacks provenance edge, so every published record here stands
+in. The pin-set declares an order for its members and nothing enforces it;
+a cycle in declared edges only stops the impact walk, it is not flagged;
+by-version pins compare integer versions, not semver. Tables, not chrome:
+the grid vocabulary (glyph + colour, never colour alone) is borrowed from
+Vic's DeliveryUX plan.

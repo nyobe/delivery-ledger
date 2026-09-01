@@ -169,3 +169,105 @@ What the slice taught, honestly:
     deploys in parallel with US). Where a fixture departs from the pipeline
     it claims to model, the departure should be legible in the fact, not
     only in a document beside it.
+
+## 2026-09-01 — the multistack scenario
+
+**Still no second mutable table.** Six new screens (estate, both binding
+kinds, hyper-preview, pin-set, impact, uptake audit) over two programs, and
+every one is a SELECT over `facts`. Same result as the first slice; recorded
+again because the second fixture was chosen to break it.
+
+18. **The per-subject layer is a materialisation boundary, not a speed-up.**
+    Generalising `v_carried` to per-(stage, stack) multiplied the cost of
+    every correlated reference to it, and the trace views nest five levels
+    of those: a pulumi-service render went from seconds to minutes. The
+    renderer now materialises every view once per build, in file order,
+    and `--pure` keeps them as views to prove nothing depends on it. It
+    proved two things. On pulumi-service the pages are byte-identical —
+    after fixing one `group_concat` whose order differed between a table
+    scan and a view. On multistack, pure mode cannot run the trace at all:
+    SQLite refuses the statement (more than 65 535 table references once
+    the views are inlined). The layering in views.sql — subjects → current
+    state → derived → screens — is where a status store would sit; the
+    ledger stays the only source, and the store is a cache the views
+    define. That is the shape OPEN 5 should assume.
+
+19. **Carried-since is not last-enacted-at.** A record uptake re-enacts the
+    consumer stack with the same freight; the first version of
+    `v_carried_stack` took the latest success as "since", so payments/
+    staging read as carrying A231 "since 11:40" after its record uptake,
+    and payments/prod's awaiting-since jumped with it. `since` is now the
+    first success of the current freight after the last success of any
+    other; `last_enacted_at` is kept beside it. Two clocks, both honest,
+    and the grid wanted the first.
+
+20. **Two of the five term types have no meaning on an edge.** Uptake is a
+    promotion on the edge, so its gate reuses the term vocabulary —
+    `approved` (an approval for that record version), `not_held` (the
+    consumer stage), `plan_safe_or_approved` (the hyper-preview). But
+    `verified` and `carried` name a stage and a freight, and an uptake has
+    neither; `v_uptake_term` labels them undefined rather than passing
+    them. For OPEN 4: the language needs a notion of which terms are
+    well-typed on which subject, not one flat vocabulary.
+
+21. **Patterns are expanded by the fixture, not by SQL.** A binding is
+    declared once per program and instantiated per environment; the
+    instances carry a `pattern` reference and the views read instances
+    only. That kept `v_edge` unchanged for the first scenario and the
+    "same pair, re-instantiated per stage" story explicit in the facts. The
+    cost is that the interface/resolution split (P4) lives in the apply,
+    which is where it belongs — but a program that adds an environment
+    must re-apply for the new instance to exist.
+
+22. **The hyper-preview is a fact now, and it needed its own lane.** A
+    `plan.summarized` with `against_record` on the consumer stage would
+    have replaced the stage's own promotion plan in `v_plan` (latest wins
+    per stage × freight). Stage plans and record previews are now two
+    views over one kind, split on the presence of `against_record`. Same
+    kind, different question; the payload field is the discriminator.
+
+23. **A pin-set is a join with no enactment.** `release.pinned` names one
+    freight per program and an order. Its per-environment state is
+    complete/partial/pending over the members' lanes, and nothing enforces
+    the order or coordinates a cutover — the architecture's "the composite
+    transition coordinates cutover ordering" has no fact to stand on yet.
+    What the fixture does show: the pin-set is legitimately written by
+    someone outside both programs, and each member still moved only under
+    its own team's decision.
+
+24. **"Pending" on a by-version edge is a membership question.** The pin is
+    in the consumer's config, so published-but-not-pinned is the only
+    edge-level state; after the bump PR the question is "which freight
+    carries the pin and where is it" — `v_pin_stage` joins lanes. The
+    uptake decision and the config pin can disagree (a mutation check
+    removes the pin from every freight): the view says `unpinned` per
+    stage while the edge says pinned. Two facts, one from a PR and one
+    from a build; neither is derived from the other, so the inconsistency
+    is visible rather than hidden.
+
+25. **What a stage is wired with is the consumed-version vector.** The
+    estate cell's `wired: cluster_endpoint v3` is `v_pending_uptake`
+    filtered to the consumer stage — the version vector of records it has
+    taken up, as data. The architecture's "what is staging actually wired
+    with" (2026-08-31-output-records) is that column.
+
+26. **Retry is the executor's business.** The failed cluster leg in
+    staging is retried by a second transition citing the same standing
+    decision; no second `promotion.decided` is written, so the audit has
+    nothing to flag and the grid moves failed → in-flight → converged. A
+    retry that wrote a person's decision would be flagged as a person's
+    decision, which is right: the intent did not change.
+
+27. **`pending_downstream` is computed by string surgery.** The estate
+    counts pending uptakes whose producer's stage is this stage by
+    splitting `producer` on `@`. The producer of a record should be a
+    (stack, stage) pair in the fact, not a string the view parses.
+
+28. **The impact walk guards against cycles by not revisiting a node; it
+    does not flag the cycle.** Declared edges can be checked for cycles
+    statically (the architecture says so); no view does it yet.
+
+29. **`release-train` is program-scoped now, and still a sentinel.** The
+    candidate for a stage whose upstream is the release train is the
+    latest cut freight *of that stage's program*; the sentinel string
+    survives from #3.
