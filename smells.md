@@ -44,7 +44,9 @@ What the slice taught, honestly:
    train moves, so the grid follows it; the two worker-pool edges render
    separately. A stage-with-many-stacks grid needs (stage, stack) cells and
    a per-stack "carried" — which is the multi-stack scenario's first
-   demand.
+   demand. *(Resolved 2026-09-01: `v_carried_stack`, and a `partial` state
+   when the stacks disagree — the warehouse declares which stacks its
+   freight enacts.)*
 
 5. **`state.observed` reports freight ids.** The conformance watch says
    `api: F416`; in reality it reads ECS task-definition SHA tags (what
@@ -122,8 +124,9 @@ What the slice taught, honestly:
     concatenates "preview consumer with key = value". The honest artefact is a
     `plan.summarized` for the consumer against the proposed record —
     Moderna's hyper-preview — which would make the uptake gate evaluable
-    at rest exactly as the diff-gate is. Not built; it is the multi-stack
-    scenario's first fact.
+    at rest exactly as the diff-gate is. *(Resolved in the multistack
+    scenario: `plan.summarized` with `against_record`, read by the edge's
+    gate — see #22.)*
 
 17. **Two kinds of binding, and the fixture drew the wrong one for the
     AMI.** Claire's read of the real mechanism (2026-09-01): the bake runs
@@ -146,7 +149,8 @@ What the slice taught, honestly:
     config pins the version → ordinary lanes; "pending" = published but in
     no freight yet, and "where is ami v13" is a trace question. Bindings
     are the multi-stack scenario's core; model both kinds there, side by
-    side.
+    side. *(Done: the multistack scenario's by-version pin is this shape —
+    #24.)*
 
 12. **Latest-wins is by arrival, not by clock.** Two facts can share a
     timestamp; every "latest" view now dedups by `seq`. The verification
@@ -183,11 +187,15 @@ again because the second fixture was chosen to break it.
     of those: a pulumi-service render went from seconds to minutes. The
     renderer now materialises every view once per build, in file order,
     and `--pure` keeps them as views to prove nothing depends on it. It
-    proved two things. On pulumi-service the pages are byte-identical —
-    after fixing one `group_concat` whose order differed between a table
-    scan and a view. On multistack, pure mode cannot run the trace at all:
-    SQLite refuses the statement (more than 65 535 table references once
-    the views are inlined). The layering in views.sql — subjects → current
+    proved two things. Every view pure mode can evaluate returns the
+    same rows, as a set, as the materialised build (`--pure-check`) —
+    after fixing one `group_concat` whose order differed between a
+    table scan and a view, which the earlier whole-page comparison
+    caught and a set comparison would not; scan-order differences in
+    views without an ORDER BY remain unproven either way. And `v_trace_summary` cannot be evaluated pure at all, on either
+    scenario: SQLite refuses the statement (more than 65 535 table
+    references once the views are inlined) — 61 of 62 views agree, one is
+    unreachable without the boundary. The layering in views.sql — subjects → current
     state → derived → screens — is where a status store would sit; the
     ledger stays the only source, and the store is a cache the views
     define. That is the shape OPEN 5 should assume.
@@ -271,3 +279,25 @@ again because the second fixture was chosen to break it.
     candidate for a stage whose upstream is the release train is the
     latest cut freight *of that stage's program*; the sentinel string
     survives from #3.
+
+30. **The stack is grip-granularity content that never became a subject.**
+    `v_carried_stack` is per (stage, stack), the warehouse declares the
+    stacks its freight enacts, transitions name their stack — but `stack`
+    is a payload string, not a declared subject with facts of its own. P5
+    says subjects come at the size you operate on; the scenario operated
+    on stacks (a failed leg, a partial rollout, a per-stack record) with
+    no subject to hang those on. Whether the stack is the subject and the
+    stage a grouping, or the reverse, is a real call the fixture ducked.
+
+31. **An enactment's claim about what it consumed is unchecked.** A
+    transition carries `record_version` as a display field; nothing joins
+    it to the record actually published or taken up at the time. A cluster
+    leg claiming to have run against network v1 after v2 was taken up
+    renders as converged. The honest view would compare the enactment's
+    version vector to the edge's consumed versions at its start — the
+    conformance join, one level down.
+
+32. **Concurrent legs.** A multi-stack promotion can have two legs open at
+    once; `v_inflight` keeps one row per stage (the grid joins on it) but
+    now counts and names every open leg. The first version showed only the
+    latest, which is the single-stack assumption in one more place.

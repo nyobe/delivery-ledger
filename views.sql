@@ -207,8 +207,8 @@ SELECT t.stage, t.stack, t.freight,
          WHERE u.stage = t.stage AND u.stack = t.stack AND u.outcome = 'succeeded' AND u.freight = t.freight
            AND u.finished_seq > coalesce((SELECT max(v.finished_seq) FROM v_freight_transition v
                                           WHERE v.stage = t.stage AND v.stack = t.stack AND v.outcome = 'succeeded'
-                                            AND v.freight IS NOT t.freight), 0)) AS since,
-       t.finished_at AS last_enacted_at, t.ops_update, t.transition, t.finished_fact AS fact
+                                            AND v.freight IS NOT NULL AND v.freight <> t.freight), 0)) AS since,
+       t.finished_at AS last_enacted_at, t.finished_seq, t.ops_update, t.transition, t.finished_fact AS fact
 FROM v_freight_transition t
 WHERE t.outcome = 'succeeded' AND t.freight IS NOT NULL
   AND t.finished_seq = (SELECT max(u.finished_seq) FROM v_freight_transition u
@@ -243,11 +243,19 @@ JOIN (SELECT program, count(*) AS n FROM v_program_stack GROUP BY program) n ON 
 JOIN v_carried_stack k ON k.stage = s.stage
 JOIN v_carried_stack last ON last.stage = s.stage
      AND last.transition = (SELECT k3.transition FROM v_carried_stack k3 WHERE k3.stage = s.stage
-                            ORDER BY k3.since DESC, k3.fact DESC LIMIT 1)
+                            ORDER BY k3.since DESC, k3.finished_seq DESC LIMIT 1)
 GROUP BY s.stage;
 
+-- One row per stage (the grid joins on it): the latest open leg is the
+-- representative; every open leg is counted and named, since a multi-stack
+-- promotion can have several in flight at once.
 CREATE VIEW v_inflight AS
-SELECT t.* FROM v_freight_transition t
+SELECT t.*,
+       (SELECT count(*) FROM v_freight_transition u WHERE u.stage = t.stage AND u.finished_at IS NULL) AS n_inflight,
+       (SELECT group_concat(x, ', ') FROM (SELECT u.stack || '@' || coalesce(u.freight, 'record v' || u.record_version) AS x
+                                            FROM v_freight_transition u WHERE u.stage = t.stage AND u.finished_at IS NULL
+                                            ORDER BY u.stack)) AS inflight_detail
+FROM v_freight_transition t
 WHERE t.finished_at IS NULL
   AND t.started_seq = (SELECT max(u.started_seq) FROM v_freight_transition u
                        WHERE u.stage = t.stage AND u.finished_at IS NULL);
@@ -560,6 +568,7 @@ SELECT s.ord, s.stage, s.program, s.environment, s.region, s.owner, s.url, s.ops
        k.freight AS carried, k.since AS carried_since, k.ops_update,
        k.n_stacks, k.n_stacks_carrying, k.stacks_detail,
        i.transition AS inflight, i.freight AS inflight_freight, i.last_phase, i.started_at AS inflight_since,
+       i.n_inflight, i.inflight_detail,
        lf.outcome AS last_outcome, lf.freight AS last_outcome_freight, lf.finished_at AS last_outcome_at,
        lf.error AS last_error, lf.transition AS last_transition, lf.failed_step, lf.step_url,
        ge.freight AS candidate, ge.passes, ge.awaiting, ge.awaiting_type, ge.awaiting_since,
@@ -985,8 +994,8 @@ SELECT g.*,
        (SELECT group_concat(x, ', ') FROM (SELECT pu.key || ' v' || pu.consumed_version AS x FROM v_pending_uptake pu
                                             WHERE pu.consumer_stage = g.stage AND pu.consumed_version IS NOT NULL ORDER BY pu.key)) AS wired,
        (SELECT count(*) FROM v_pending_uptake pu WHERE pu.consumer_stage = g.stage AND pu.pending = 1) AS pending_uptakes,
-       (SELECT count(*) FROM v_pending_uptake pu WHERE pu.producer = pu.producer
-          AND substr(pu.producer, instr(pu.producer, '@') + 1) = g.stage AND pu.pending = 1) AS pending_downstream
+       (SELECT count(*) FROM v_pending_uptake pu
+         WHERE substr(pu.producer, instr(pu.producer, '@') + 1) = g.stage AND pu.pending = 1) AS pending_downstream
 FROM v_grid g;
 
 -- Past releases: Keith's release cards. The card itself is the cut freight;
@@ -1108,8 +1117,8 @@ SELECT d.subject AS edge, json_extract(d.payload, '$.record_version') AS version
        json_array_length(d.refs) AS n_refs, e.uptake AS mode, e.consumer,
        (SELECT count(*) FROM v_uptake_audit_term x WHERE x.decision = d.id)                            AS n_required,
        (SELECT count(*) FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NULL) AS n_unmet,
-       (SELECT group_concat(x.requirement, '; ') FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NULL) AS unmet,
-       (SELECT group_concat(x.satisfied_by, ' ') FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NOT NULL) AS evidence,
+       (SELECT group_concat(requirement, '; ') FROM (SELECT x.requirement FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NULL ORDER BY x.idx)) AS unmet,
+       (SELECT group_concat(satisfied_by, ' ') FROM (SELECT x.satisfied_by FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NOT NULL ORDER BY x.idx)) AS evidence,
   CASE
     WHEN d.actor NOT LIKE 'policy:%' AND e.terms IS NOT NULL THEN 'decided by ' || d.actor || ' directly, not by the edge policy'
     WHEN (SELECT count(*) FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NULL) > 0

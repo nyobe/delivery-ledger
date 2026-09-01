@@ -6,6 +6,7 @@
     ./render.py --lint-only                       lint + self-checks, no HTML
     ./render.py --as-of 2026-08-24T16:20:00Z      render the ledger as it stood then
     ./render.py --pure                            views evaluated on demand, no per-build materialisation
+    ./render.py --pure-check                      every view's rows, materialised vs pure, at the primary instant
 
 Everything the page shows is a SELECT over the `facts` table (schema.sql,
 views.sql). The renderer holds no state: it loads the facts whose timestamp is
@@ -195,7 +196,7 @@ PURE = False
 VIEW_SQL = {}  # name -> the CREATE VIEW text, for the page's "the query" panels
 
 
-def build_db(facts, as_of):
+def build_db(facts, as_of, pure=None):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     with open(os.path.join(HERE, "schema.sql")) as fh:
@@ -212,7 +213,7 @@ def build_db(facts, as_of):
         db.executescript(fh.read())
     views = [(r["name"], r["sql"]) for r in q(db, "SELECT name, sql FROM sqlite_master WHERE type='view' ORDER BY rowid")]
     VIEW_SQL.update(views)
-    if not PURE:
+    if not (PURE if pure is None else pure):
         for name, sql in views:
             body = re.split(r"^CREATE VIEW \S+ AS\s+", sql, maxsplit=1)[1]
             db.execute(f"DROP VIEW {name}")
@@ -222,6 +223,38 @@ def build_db(facts, as_of):
 
 def q(db, sql, *args):
     return [dict(r) for r in db.execute(sql, args).fetchall()]
+
+
+def pure_check(facts, as_of, step_budget=200_000_000):
+    """Row-for-row identity of every view between a materialised build and a pure one.
+
+    A view pure mode cannot evaluate — SQLite's limit on table references once the
+    views are inlined, or a step budget blown — is reported as skipped, not as a
+    difference: the point is that every view it *can* evaluate agrees.
+    """
+    mat = build_db(facts, as_of, pure=False)
+    pur = build_db(facts, as_of, pure=True)
+    steps = [0]
+    def tick():
+        steps[0] += 1
+        return steps[0] > step_budget // 1000
+    pur.set_progress_handler(tick, 1000)
+    same, differ, skipped = [], [], []
+    for name in VIEW_SQL:
+        rows_m = sorted(json.dumps(r, sort_keys=True, default=str) for r in q(mat, f"SELECT * FROM {name}"))
+        steps[0] = 0
+        try:
+            rows_p = sorted(json.dumps(r, sort_keys=True, default=str) for r in q(pur, f"SELECT * FROM {name}"))
+        except sqlite3.OperationalError as e:
+            skipped.append((name, "interrupted: step budget" if "interrupted" in str(e) else str(e)))
+            continue
+        (same if rows_m == rows_p else differ).append(name)
+    print(f"pure-check at {as_of}: {len(same)} views identical, {len(differ)} differ, {len(skipped)} pure mode could not evaluate")
+    for n in differ:
+        print(f"  ✗ {n} differs")
+    for n, why in skipped:
+        print(f"  – {n}: {why}")
+    return 1 if differ else 0
 
 
 def one(db, sql, *args):
@@ -409,6 +442,8 @@ def screen_grid(db, as_of):
             detail = f'{esc(r["awaiting"])} · candidate {mono(r["candidate"])}'
         elif st == "in-flight":
             detail = f'{mono(r["inflight"])} · {mono(r["inflight_freight"])}' + (f' · phase <b>{esc(r["last_phase"])}</b>' if r["last_phase"] else "") + f' · since {esc(fmt_ts(r["inflight_since"]))}'
+            if r["n_inflight"] and r["n_inflight"] > 1:
+                detail += f'<div class="muted small">{esc(r["n_inflight"])} legs in flight: {esc(r["inflight_detail"])}</div>'
         elif st == "superseded":
             detail = f'{mono(r["inflight"])} still enacting {mono(r["inflight_freight"])}; decision moved to {mono(r["desired"])} at {esc(fmt_ts(r["decided_at"]))}'
         elif st == "failed":
@@ -643,7 +678,8 @@ def screen_uptake(db, as_of):
             terms = '<div class="small">' + "<br>".join(trows) + "</div>"
         pol = f'uptake <b>{esc(r["policy"])}</b>' + (f' · <code>{esc(r["rule"])}</code>' if r["rule"] and r["rule"] != "true" else "")
         rows.append([
-            f'<b>{esc(r["consumer"])}</b><div class="small muted">{esc(r["key"])} ← {esc(r["producer"])}</div><div class="small muted">{pol}</div>',
+            f'<b>{esc(r["consumer"])}</b><div class="small muted">{esc(r["key"])} ← {esc(r["producer"])}</div><div class="small muted">{pol}</div>'
+            + (f'<div class="small muted">{esc(r["description"])}</div>' if r["description"] else ""),
             (f'v{esc(r["published_version"])} {mono(r["published_value"])}<div class="small muted">published {esc(fmt_ts(r["published_at"]))} {fact_ref(r["published_fact"])}</div>' if r["published_version"] is not None else '<span class="muted">—</span>'),
             preview,
             (f'v{esc(r["consumed_version"])}<div class="small muted">{esc(fmt_ts(r["consumed_at"]))} · {esc(r["consumed_by"])}</div>' if r["consumed_version"] is not None else '<span class="muted">never</span>'),
@@ -669,7 +705,8 @@ def screen_uptake(db, as_of):
                 pinned = (chip("converged", f'pinned v{pn["pinned_version"]}')
                           + f'<div class="small muted">{esc(pn["pinned_by"])} · {esc(pn["pinned_via"] or "")} · {esc(fmt_ts(pn["pinned_at"]))} {fact_ref(pn["pinned_fact"])}</div>'
                           + (f'<div class="small muted">in freight {mono(pn["pinned_in"])} · {esc(fmt_ts(pn["pinned_in_at"]))}</div>' if pn["pinned_in"] else '<div class="small muted">no freight carries the pin yet</div>'))
-            row = [f'<b>{esc(pn["consumer"])}</b><div class="small muted">{esc(pn["key"])} ← {esc(pn["producer"])} · by-version · uptake <b>{esc(pn["policy"])}</b></div>',
+            row = [f'<b>{esc(pn["consumer"])}</b><div class="small muted">{esc(pn["key"])} ← {esc(pn["producer"])} · by-version · uptake <b>{esc(pn["policy"])}</b></div>'
+                   + (f'<div class="small muted">{esc(pn["description"])}</div>' if pn["description"] else ""),
                    (f'v{esc(pn["published_version"])} {mono(pn["published_value"])}<div class="small muted">published {esc(fmt_ts(pn["published_at"]))} {fact_ref(pn["published_fact"])}</div>'
                     + (f'<div class="small muted">{esc(pn["published_note"])}</div>' if pn["published_note"] else "")) if pn["published_version"] is not None else '<span class="muted">—</span>',
                    pinned]
@@ -687,9 +724,9 @@ def screen_uptake(db, as_of):
             prows.append(row)
         pin_html = ('<h3>By version: the pin rides the consumer\'s train</h3>'
                     '<p class="lede">The producer publishes a stage-invariant record; the consumer pins a version in its config. '
-                    'The uptake is that config change — here a bot PR that auto-merges on green checks — and from then on '
-                    'it is ordinary freight, meeting every stage\'s gates on the way. "Pending" means published but not pinned; '
-                    '"where is v41" is a lanes question.</p>'
+                    'The uptake is that config change, however it is made, and from then on it is ordinary freight, meeting '
+                    'every stage\'s gates on the way. "Pending" means published but not pinned; where the pin has got to is '
+                    'a lanes question, answered per consumer stage on the right.</p>'
                     + table(["consumer · binding", "published (evidence)", "pinned (intent)", *stages], prows))
     return section("uptake", "5 · uptake, gated and auto", f'Publication is evidence; uptake is intent — {n_pending} pending',
                    "Each binding declares its uptake policy, and a by-reference edge's gate is the same kind of thing as "
@@ -1128,7 +1165,8 @@ def main():
     ap.add_argument("--out", help="output page (default: out/<scenario>/index.html)")
     ap.add_argument("--as-of", action="append", help="render the ledger as of this instant (repeatable; first is primary)")
     ap.add_argument("--lint-only", action="store_true")
-    ap.add_argument("--pure", action="store_true", help="evaluate every view on demand instead of materialising per build (slow; must give the same page)")
+    ap.add_argument("--pure", action="store_true", help="evaluate every view on demand instead of materialising per build (slow; the deep views may exceed SQLite's reference limit)")
+    ap.add_argument("--pure-check", action="store_true", help="compare every view's rows between a materialised build and a pure one at the primary instant")
     args = ap.parse_args()
     global PURE
     PURE = args.pure
@@ -1143,6 +1181,9 @@ def main():
             print("  " + e, file=sys.stderr)
         return 1
     print(f"lint: {len(facts)} facts, clean")
+
+    if args.pure_check:
+        return pure_check(facts, scenario.DEFAULT_AS_OF)
 
     n, failures = self_checks(scenario, facts)
     if failures:

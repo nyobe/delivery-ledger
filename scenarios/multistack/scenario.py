@@ -241,6 +241,34 @@ def self_checks(check, H, facts):
           lambda db: one(db, "SELECT pinned_in FROM v_pin_uptake")["pinned_in"] is None
           and all(r["pin_state"] == "unpinned" for r in q(db, "SELECT * FROM v_pin_stage")), m_unpinned)
 
+    def m_uptake_only_enactment(fs):
+        fs.append({"id": "m002", "ts": "2026-09-01T16:00:00Z", "class": "observation", "kind": "transition.started", "subject": "transition:m-uptake",
+                   "actor": "ci:gha", "payload": {"stage": "payments/prod", "freight": None, "stack": "payments", "run": "gha:x", "record_version": 4}})
+        fs.append({"id": "m003", "ts": "2026-09-01T16:02:00Z", "class": "observation", "kind": "transition.finished", "subject": "transition:m-uptake",
+                   "actor": "ci:gha", "payload": {"outcome": "succeeded", "ops_update": 9, "summary": {"create": 0, "update": 1, "delete": 0, "replace": 0}}})
+    check("mutation: an uptake-only enactment (freight NULL, the pulumi-service shape) does not disturb what payments/prod carries or since when", "2026-09-01T16:05:00Z",
+          lambda db: (lambda r: r["status"] == "awaiting" and r["carried"] == "A230" and r["carried_since"] == "2026-08-25T14:20:00Z")(grid(db, "payments/prod")),
+          m_uptake_only_enactment)
+
+    def m_both_legs_open(fs):
+        fs.remove(find(fs, kind="transition.finished", subject="transition:P12-network-prod"))
+        fs.remove(find(fs, kind="output.published", subject="record:network@platform/prod", p_version=2))
+        u = find(fs, kind="uptake.decided", subject=E_NET_PROD, p_record_version=2)
+        for f in fs:
+            if u["id"] in f.get("refs", []):
+                f["refs"] = [r for r in f["refs"] if r != u["id"]]
+        fs.remove(u)
+    check("mutation: two legs open at once in platform/prod — the grid names both, not just the latest", "2026-09-01T14:30:00Z",
+          lambda db: (lambda r: r["status"] == "in-flight" and r["n_inflight"] == 2 and r["inflight_detail"] == "cluster@P12, network@P12")(grid(db, "platform/prod")),
+          m_both_legs_open)
+
+    def m_verified_term_on_edge(fs):
+        e = find(fs, kind="binding.declared", subject=E_PROD)
+        e["payload"]["terms"] = [{"type": "verified", "stage": "platform/prod", "check": "smoke"}]
+    check("mutation: a verified term on an edge is undefined, not silently passed — the gate stays closed and says why", A,
+          lambda db: (lambda r: r["passes"] == 0 and r["awaiting"] == "verified is not defined on an edge")(pu(db, "payments@payments/prod")),
+          m_verified_term_on_edge)
+
     def m_cross_program_pr(fs):
         find(fs, kind="freight.discovered", subject="freight:A231")["payload"]["warehouse"] = "platform"
     check("mutation: a payments build attributed to the platform warehouse leaks its PRs into platform membership (P12 'contains' #4428) — the warehouse key is load-bearing", A,

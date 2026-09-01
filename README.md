@@ -31,11 +31,14 @@ materialised once per build is a rendering choice. By default `render.py`
 materialises every view in file order (views.sql is layered bottom-up), so
 each layer is computed once from the one below instead of being re-derived
 inside every correlated subquery above it — a full run of either scenario
-takes well under a second. `--pure` keeps them as views: on pulumi-service it
-renders the same page byte for byte (the check that nothing depends on the
-materialisation); on multistack the trace views nest deeply enough to exceed
-SQLite's limit on table references per statement, which is the sharper
-statement of the same point (smells.md #18).
+takes well under a second. `--pure-check` builds both ways at the primary
+instant and compares every view's rows as sets (order is not compared —
+an unordered view is legitimately unordered): on both scenarios 61 views
+return the same rows, and the one pure mode cannot evaluate —
+`v_trace_summary`, which nests deeply enough once inlined to exceed SQLite's
+limit on table references per statement — is reported as such rather than
+counted as agreement. That is the check that nothing depends on the materialisation,
+and the sharper statement of why it is there (smells.md #18).
 
 ## What is in here
 
