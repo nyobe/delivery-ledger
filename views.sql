@@ -17,15 +17,25 @@ SELECT substr(f.subject, 11)                        AS name,
        json_extract(f.payload, '$.repo')            AS repo,
        json_extract(f.payload, '$.branch')          AS branch,
        json_extract(f.payload, '$.images')          AS images,
+       json_extract(f.payload, '$.program')         AS program,
+       json_extract(f.payload, '$.stacks')          AS stacks,
        f.ts AS declared_at, f.id AS fact
 FROM facts f
 WHERE f.kind = 'warehouse.declared'
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);
 
+-- The stacks a program's freight enacts (declared on its warehouse). A stage
+-- may host other stacks too; those carry records, not freight.
+CREATE VIEW v_program_stack AS
+SELECT w.program, je.value AS stack
+FROM v_warehouse w, json_each(w.stacks) je;
+
 CREATE VIEW v_stage AS
 SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.order')           AS ord,
        json_extract(f.payload, '$.display')         AS display,
+       json_extract(f.payload, '$.program')         AS program,
+       json_extract(f.payload, '$.environment')     AS environment,
        json_extract(f.payload, '$.region')          AS region,
        json_extract(f.payload, '$.url')             AS url,
        json_extract(f.payload, '$.ops')             AS ops,
@@ -63,12 +73,22 @@ SELECT p.stage,
        json_extract(t.value, '$.via')               AS via
 FROM v_policy p, json_each(p.terms) t;
 
+-- A binding is consumer-resident wiring (P4): by-reference (a per-stage
+-- record, taken up under the edge's own policy) or by-version (a pin in the
+-- consumer's config, riding its freight). Declared once per program as a
+-- pattern, instantiated per environment; `pattern` cites the declaration.
 CREATE VIEW v_edge AS
 SELECT f.subject                                    AS edge,
        json_extract(f.payload, '$.consumer')        AS consumer,
        json_extract(f.payload, '$.producer')        AS producer,
        json_extract(f.payload, '$.key')             AS key,
+       coalesce(json_extract(f.payload, '$.kind'), 'by-reference') AS kind,
        json_extract(f.payload, '$.uptake')          AS uptake,
+       json_extract(f.payload, '$.terms')           AS terms,
+       json_extract(f.payload, '$.environment')     AS environment,
+       json_extract(f.payload, '$.consumer_program') AS consumer_program,
+       json_extract(f.payload, '$.producer_program') AS producer_program,
+       json_extract(f.payload, '$.pattern')         AS pattern,
        json_extract(f.payload, '$.description')     AS description,
        f.id AS fact
 FROM facts f
@@ -78,6 +98,7 @@ WHERE f.kind = 'binding.declared'
 -- Freight is discovered (observation) and may later be cut as a release (intent).
 CREATE VIEW v_freight AS
 SELECT substr(f.subject, 9)                         AS freight,
+       json_extract(f.payload, '$.warehouse')       AS warehouse,
        json_extract(f.payload, '$.source.sha')      AS sha,
        json_extract(f.payload, '$.source.branch')   AS branch,
        json_extract(f.payload, '$.build')           AS build,
@@ -95,8 +116,9 @@ LEFT JOIN facts c ON c.kind = 'release.cut' AND c.subject = f.subject
                  AND c.seq = (SELECT max(x.seq) FROM facts x WHERE x.kind = 'release.cut' AND x.subject = f.subject)
 WHERE f.kind = 'freight.discovered';
 
--- Membership is cumulative along a branch: a PR merged to master is in every
--- later master build. `prs` on a freight lists what that build introduced.
+-- Membership is cumulative along a warehouse's branch: a PR merged to master
+-- is in every later master build. `prs` on a freight lists what that build
+-- introduced. Keyed by warehouse — two programs' branches are two histories.
 CREATE VIEW v_membership AS
 SELECT later.freight,
        json_extract(pr.value, '$.number')           AS pr,
@@ -105,7 +127,7 @@ SELECT later.freight,
        earlier.freight                              AS introduced_in,
        earlier.discovered_at                        AS merged_at
 FROM v_freight later
-JOIN v_freight earlier ON earlier.branch = later.branch
+JOIN v_freight earlier ON earlier.warehouse = later.warehouse
                       AND (earlier.discovered_at < later.discovered_at OR earlier.freight = later.freight),
      json_each(earlier.prs) pr;
 
@@ -117,7 +139,7 @@ FROM v_freight r
 JOIN v_membership m ON m.freight = r.freight
 WHERE r.cut_at IS NOT NULL
   AND m.merged_at > coalesce((SELECT max(p.discovered_at) FROM v_freight p
-                              WHERE p.cut_at IS NOT NULL AND p.cut_at < r.cut_at), '');
+                              WHERE p.warehouse = r.warehouse AND p.cut_at IS NOT NULL AND p.cut_at < r.cut_at), '');
 
 ---------------------------------------------------------------------------
 -- Per-subject current state: latest fact of a kind
@@ -162,26 +184,66 @@ LEFT JOIN facts e ON e.kind = 'transition.finished' AND e.subject = s.subject
                  AND e.seq = (SELECT max(x.seq) FROM facts x WHERE x.kind = 'transition.finished' AND x.subject = s.subject)
 WHERE s.kind = 'transition.started';
 
--- Observation: what each stage actually carries — the latest enactment of the
--- service stack that finished successfully.
-CREATE VIEW v_carried AS
-SELECT t.stage, t.freight, t.finished_at AS since, t.ops_update, t.transition, t.finished_fact AS fact
+-- Transitions on a stage's freight stacks (the stacks its program's freight
+-- enacts). Enactments of other stacks hosted there — record uptakes on a
+-- worker pool — are transitions too, but they do not move the freight lane.
+CREATE VIEW v_freight_transition AS
+SELECT t.*
 FROM v_transition t
-WHERE t.stack = 'service' AND t.outcome = 'succeeded'
-  AND t.finished_seq = (SELECT max(u.finished_seq) FROM v_transition u
-                        WHERE u.stage = t.stage AND u.stack = 'service' AND u.outcome = 'succeeded');
+JOIN v_stage s ON s.stage = t.stage
+JOIN v_program_stack ps ON ps.program = s.program AND ps.stack = t.stack;
+
+-- Observation: what each (stage, stack) actually carries — the latest
+-- freight enactment on that stack that finished successfully.
+CREATE VIEW v_carried_stack AS
+SELECT t.stage, t.stack, t.freight, t.finished_at AS since, t.ops_update, t.transition, t.finished_fact AS fact
+FROM v_freight_transition t
+WHERE t.outcome = 'succeeded' AND t.freight IS NOT NULL
+  AND t.finished_seq = (SELECT max(u.finished_seq) FROM v_freight_transition u
+                        WHERE u.stage = t.stage AND u.stack = t.stack
+                          AND u.outcome = 'succeeded' AND u.freight IS NOT NULL);
+
+-- When a stage first carried a freight on every one of its freight stacks.
+CREATE VIEW v_first_carried AS
+SELECT s.stage, t.freight, max(t.first_at) AS at
+FROM v_stage s
+JOIN (SELECT x.stage, x.stack, x.freight, min(x.finished_at) AS first_at
+        FROM v_freight_transition x
+       WHERE x.outcome = 'succeeded' AND x.freight IS NOT NULL
+       GROUP BY x.stage, x.stack, x.freight) t ON t.stage = s.stage
+GROUP BY s.stage, t.freight
+HAVING count(*) = (SELECT count(*) FROM v_program_stack ps WHERE ps.program = s.program);
+
+-- What a stage carries: the freight every one of its freight stacks carries,
+-- or NULL with the per-stack detail when they disagree (a partial rollout).
+-- `since` and the update handle come from the stack that finished last.
+CREATE VIEW v_carried AS
+SELECT s.stage,
+       CASE WHEN count(k.stack) = n.n AND count(DISTINCT k.freight) = 1 THEN min(k.freight) END AS freight,
+       max(k.since)                                 AS since,
+       last.ops_update, last.transition, last.fact,
+       count(k.stack)                               AS n_stacks_carrying,
+       n.n                                          AS n_stacks,
+       group_concat(k.stack || '@' || k.freight, ', ') AS stacks_detail
+FROM v_stage s
+JOIN (SELECT program, count(*) AS n FROM v_program_stack GROUP BY program) n ON n.program = s.program
+JOIN v_carried_stack k ON k.stage = s.stage
+JOIN v_carried_stack last ON last.stage = s.stage
+     AND last.transition = (SELECT k3.transition FROM v_carried_stack k3 WHERE k3.stage = s.stage
+                            ORDER BY k3.since DESC, k3.fact DESC LIMIT 1)
+GROUP BY s.stage;
 
 CREATE VIEW v_inflight AS
-SELECT t.* FROM v_transition t
-WHERE t.stack = 'service' AND t.finished_at IS NULL
-  AND t.started_seq = (SELECT max(u.started_seq) FROM v_transition u
-                       WHERE u.stage = t.stage AND u.stack = 'service' AND u.finished_at IS NULL);
+SELECT t.* FROM v_freight_transition t
+WHERE t.finished_at IS NULL
+  AND t.started_seq = (SELECT max(u.started_seq) FROM v_freight_transition u
+                       WHERE u.stage = t.stage AND u.finished_at IS NULL);
 
 CREATE VIEW v_last_finished AS
-SELECT t.* FROM v_transition t
-WHERE t.stack = 'service' AND t.finished_at IS NOT NULL
-  AND t.finished_seq = (SELECT max(u.finished_seq) FROM v_transition u
-                        WHERE u.stage = t.stage AND u.stack = 'service' AND u.finished_at IS NOT NULL);
+SELECT t.* FROM v_freight_transition t
+WHERE t.finished_at IS NOT NULL
+  AND t.finished_seq = (SELECT max(u.finished_seq) FROM v_freight_transition u
+                        WHERE u.stage = t.stage AND u.finished_at IS NOT NULL);
 
 -- Verification status per (stage, freight, check): latest outcome wins.
 CREATE VIEW v_verified AS
@@ -315,19 +377,21 @@ CREATE VIEW v_candidate AS
 SELECT s.stage,
   CASE
     WHEN s.upstream LIKE 'warehouse:%' THEN
-      (SELECT fr.freight FROM v_freight fr JOIN v_warehouse w ON w.name = substr(s.upstream, 11) AND fr.branch = w.branch
+      (SELECT fr.freight FROM v_freight fr WHERE fr.warehouse = substr(s.upstream, 11)
         ORDER BY fr.discovered_at DESC, fr.seq DESC LIMIT 1)
     WHEN s.upstream = 'release-train' THEN
-      (SELECT fr.freight FROM v_freight fr WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC, fr.seq DESC LIMIT 1)
+      (SELECT fr.freight FROM v_freight fr JOIN v_warehouse w ON w.name = fr.warehouse AND w.program = s.program
+        WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC, fr.seq DESC LIMIT 1)
     ELSE
       (SELECT k.freight FROM v_carried k WHERE k.stage = s.upstream)
   END AS freight,
   CASE
     WHEN s.upstream LIKE 'warehouse:%' THEN
-      (SELECT fr.discovered_at FROM v_freight fr JOIN v_warehouse w ON w.name = substr(s.upstream, 11) AND fr.branch = w.branch
+      (SELECT fr.discovered_at FROM v_freight fr WHERE fr.warehouse = substr(s.upstream, 11)
         ORDER BY fr.discovered_at DESC, fr.seq DESC LIMIT 1)
     WHEN s.upstream = 'release-train' THEN
-      (SELECT fr.cut_at FROM v_freight fr WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC, fr.seq DESC LIMIT 1)
+      (SELECT fr.cut_at FROM v_freight fr JOIN v_warehouse w ON w.name = fr.warehouse AND w.program = s.program
+        WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC, fr.seq DESC LIMIT 1)
     ELSE
       (SELECT k.since FROM v_carried k WHERE k.stage = s.upstream)
   END AS available_at
@@ -343,9 +407,8 @@ SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
     WHEN 'verified' THEN
       (SELECT v.ts FROM v_verified v
         WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk AND v.outcome = 'pass'
-          AND v.ts >= coalesce((SELECT min(x.finished_at) FROM v_transition x
-                                WHERE x.stage = t.term_stage AND x.freight = fr.freight
-                                  AND x.stack = 'service' AND x.outcome = 'succeeded'), '9999'))
+          AND v.ts >= coalesce((SELECT fc.at FROM v_first_carried fc
+                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), '9999'))
     WHEN 'carried' THEN
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN 'approved' THEN
@@ -367,14 +430,12 @@ SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
   END AS label,
   CASE t.type
     WHEN 'verified' THEN
-      CASE WHEN NOT EXISTS (SELECT 1 FROM v_transition x WHERE x.stage = t.term_stage AND x.freight = fr.freight
-                              AND x.stack = 'service' AND x.outcome = 'succeeded')
+      CASE WHEN NOT EXISTS (SELECT 1 FROM v_first_carried fc WHERE fc.stage = t.term_stage AND fc.freight = fr.freight)
            THEN 'verification: ' || t.chk || ' in ' || t.term_stage || ' (' || t.term_stage || ' has not carried ' || fr.freight || ')'
            WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = 'pass'
-                          AND v.ts < (SELECT min(x.finished_at) FROM v_transition x
-                                      WHERE x.stage = t.term_stage AND x.freight = fr.freight
-                                        AND x.stack = 'service' AND x.outcome = 'succeeded'))
+                          AND v.ts < (SELECT fc.at FROM v_first_carried fc
+                                      WHERE fc.stage = t.term_stage AND fc.freight = fr.freight))
            THEN 'verification: ' || t.chk || ' in ' || t.term_stage || ' (recorded before ' || t.term_stage || ' carried ' || fr.freight || ' — re-run)'
            ELSE 'verification: ' || t.chk || ' in ' || t.term_stage END
     WHEN 'carried'               THEN t.term_stage || ' to carry ' || fr.freight
@@ -469,18 +530,21 @@ JOIN v_candidate c ON c.stage = g.stage AND c.freight = g.freight;
 -- state. No status is stored anywhere; every column is a join. Comparisons
 -- use IS / IS NOT so a stage with no decision yet still gets a state.
 CREATE VIEW v_grid AS
-SELECT s.ord, s.stage, s.region, s.owner, s.url, s.ops,
+SELECT s.ord, s.stage, s.program, s.environment, s.region, s.owner, s.url, s.ops,
        d.freight AS desired, d.decided_at, d.decided_by,
        k.freight AS carried, k.since AS carried_since, k.ops_update,
+       k.n_stacks, k.n_stacks_carrying, k.stacks_detail,
        i.transition AS inflight, i.freight AS inflight_freight, i.last_phase, i.started_at AS inflight_since,
        lf.outcome AS last_outcome, lf.freight AS last_outcome_freight, lf.finished_at AS last_outcome_at,
        lf.error AS last_error, lf.transition AS last_transition, lf.failed_step, lf.step_url,
        ge.freight AS candidate, ge.passes, ge.awaiting, ge.awaiting_type, ge.awaiting_since,
        CASE
-         WHEN i.transition IS NOT NULL AND i.freight IS NOT d.freight              THEN 'superseded'
+         WHEN i.transition IS NOT NULL AND i.freight IS NOT NULL
+              AND i.freight IS NOT d.freight                                        THEN 'superseded'
          WHEN i.transition IS NOT NULL                                              THEN 'in-flight'
          WHEN lf.outcome = 'failed' AND lf.freight IS d.freight
               AND d.freight IS NOT k.freight                                        THEN 'failed'
+         WHEN k.stacks_detail IS NOT NULL AND k.freight IS NULL                     THEN 'partial'
          WHEN ge.freight IS NOT NULL AND ge.freight IS NOT d.freight
               AND ge.awaiting_type = 'not_held'                                     THEN 'held'
          WHEN ge.freight IS NOT NULL AND ge.freight IS NOT d.freight AND ge.passes = 0 THEN 'awaiting'
@@ -512,16 +576,15 @@ ORDER BY s.ord;
 -- switches on `cell`; it never re-derives the classification.
 CREATE VIEW v_lanes_base AS
 SELECT fr.freight, fr.release_pr, fr.cut_at, fr.discovered_at, s.stage, s.ord,
-  (SELECT min(t.finished_at) FROM v_transition t
-    WHERE t.stage = s.stage AND t.freight = fr.freight AND t.stack = 'service' AND t.outcome = 'succeeded') AS reached_at,
-  (SELECT t.started_at FROM v_transition t
-    WHERE t.stage = s.stage AND t.freight = fr.freight AND t.stack = 'service' AND t.finished_at IS NULL
+  (SELECT fc.at FROM v_first_carried fc WHERE fc.stage = s.stage AND fc.freight = fr.freight) AS reached_at,
+  (SELECT t.started_at FROM v_freight_transition t
+    WHERE t.stage = s.stage AND t.freight = fr.freight AND t.finished_at IS NULL
     ORDER BY t.started_seq DESC LIMIT 1) AS inflight_since,
-  (SELECT t.outcome FROM v_transition t
-    WHERE t.stage = s.stage AND t.freight = fr.freight AND t.stack = 'service' AND t.finished_at IS NOT NULL
+  (SELECT t.outcome FROM v_freight_transition t
+    WHERE t.stage = s.stage AND t.freight = fr.freight AND t.finished_at IS NOT NULL
     ORDER BY t.finished_seq DESC LIMIT 1) AS last_outcome,
-  (SELECT t.finished_at FROM v_transition t
-    WHERE t.stage = s.stage AND t.freight = fr.freight AND t.stack = 'service' AND t.finished_at IS NOT NULL
+  (SELECT t.finished_at FROM v_freight_transition t
+    WHERE t.stage = s.stage AND t.freight = fr.freight AND t.finished_at IS NOT NULL
     ORDER BY t.finished_seq DESC LIMIT 1) AS last_outcome_at,
   CASE WHEN ge.freight = fr.freight AND ge.passes = 0 AND d.freight IS NOT fr.freight
        THEN ge.awaiting END AS awaiting,
@@ -642,7 +705,8 @@ LEFT JOIN v_uptaken u ON u.edge = e.edge;
 CREATE VIEW v_releases AS
 SELECT fr.freight, fr.release_pr, fr.release_branch, fr.release_title, fr.cut_at, fr.sha,
        (SELECT count(*) FROM v_release_prs rp WHERE rp.freight = fr.freight)                                AS prs,
-       (SELECT group_concat('#' || rp.pr, ' ') FROM v_release_prs rp WHERE rp.freight = fr.freight)         AS pr_list
+       (SELECT group_concat('#' || pr, ' ') FROM (SELECT rp.pr FROM v_release_prs rp WHERE rp.freight = fr.freight
+                                                   ORDER BY rp.pr DESC))                                     AS pr_list
 FROM v_freight fr
 WHERE fr.cut_at IS NOT NULL
 ORDER BY fr.cut_at DESC;

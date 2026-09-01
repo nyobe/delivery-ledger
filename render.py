@@ -5,6 +5,7 @@
     ./render.py --scenario multistack             another scenario directory under scenarios/
     ./render.py --lint-only                       lint + self-checks, no HTML
     ./render.py --as-of 2026-08-24T16:20:00Z      render the ledger as it stood then
+    ./render.py --pure                            views evaluated on demand, no per-build materialisation
 
 Everything the page shows is a SELECT over the `facts` table (schema.sql,
 views.sql). The renderer holds no state: it loads the facts whose timestamp is
@@ -18,6 +19,7 @@ import html
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import sys
 import types
@@ -44,7 +46,7 @@ PLAN_KEYS = {"create", "update", "delete", "replace", "migrations_changed"}
 # Derived states must never be written down. If a fact carries one of these,
 # the demo is storing what it claims to compute.
 FORBIDDEN_KEYS = {"status", "state"}
-FORBIDDEN_VALUES = {"awaiting", "drifted", "converged", "held", "pending", "ready", "in-flight", "superseded", "idle"}
+FORBIDDEN_VALUES = {"awaiting", "drifted", "converged", "held", "pending", "ready", "in-flight", "superseded", "idle", "partial"}
 
 
 
@@ -124,13 +126,19 @@ def lint(facts):
         # Subject bookkeeping: declare before use.
         if kind == "warehouse.declared":
             declared["warehouse"].add(sname)
+            if not p.get("program") or not p.get("stacks"):
+                err(i, f, "warehouse.declared needs program and stacks (the stacks its freight enacts)")
         elif kind == "stage.declared":
             declared["stage"].add(sname)
+            if not p.get("program") or not p.get("environment"):
+                err(i, f, "stage.declared needs program and environment")
             up = p.get("upstream", "")
             if up.startswith("warehouse:") and up[10:] not in declared["warehouse"]:
                 err(i, f, f"upstream {up} is not a declared warehouse")
         elif kind == "freight.discovered":
             declared["freight"].add(sname)
+            if p.get("warehouse") not in declared["warehouse"]:
+                err(i, f, f"freight.discovered names warehouse {p.get('warehouse')!r}, not a declared warehouse")
         elif kind == "binding.declared":
             declared["edge"].add(subj)
 
@@ -171,6 +179,17 @@ def lint(facts):
 # Build: the ledger prefix at an instant
 # ---------------------------------------------------------------------------
 
+# The views are the product; whether each one is evaluated on demand or
+# materialised once per build is a rendering choice. By default build_db
+# materialises every view, in file order (views.sql is layered bottom-up), so
+# each layer is computed once from the layer below instead of being re-derived
+# inside every correlated subquery above it. `--pure` leaves them as views and
+# must render the same page — that is the check that nothing depends on the
+# materialisation.
+PURE = False
+VIEW_SQL = {}  # name -> the CREATE VIEW text, for the page's "the query" panels
+
+
 def build_db(facts, as_of):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
@@ -186,6 +205,13 @@ def build_db(facts, as_of):
     db.execute("INSERT INTO clock (now) VALUES (?)", (as_of,))
     with open(os.path.join(HERE, "views.sql")) as fh:
         db.executescript(fh.read())
+    views = [(r["name"], r["sql"]) for r in q(db, "SELECT name, sql FROM sqlite_master WHERE type='view' ORDER BY rowid")]
+    VIEW_SQL.update(views)
+    if not PURE:
+        for name, sql in views:
+            body = re.split(r"^CREATE VIEW \S+ AS\s+", sql, maxsplit=1)[1]
+            db.execute(f"DROP VIEW {name}")
+            db.execute(f"CREATE TABLE {name} AS {body}")
     return db
 
 
@@ -340,9 +366,8 @@ def table(cols, rows, cls=""):
 def sql_block(db, *names, extra=None):
     parts = []
     for n in names:
-        r = one(db, "SELECT sql FROM sqlite_master WHERE name=?", n)
-        if r:
-            parts.append(r["sql"] + ";")
+        if n in VIEW_SQL:
+            parts.append(VIEW_SQL[n] + ";")
     if extra:
         parts.append(extra.strip())
     return ('<details class="sql"><summary>the query</summary><pre>'
@@ -378,6 +403,8 @@ def screen_grid(db, as_of):
             detail = f'gate passes for {mono(r["candidate"])}; enactment not started'
         elif st == "pending":
             detail = f'decided {esc(fmt_ts(r["decided_at"]))}; enactment not started'
+        elif st == "partial":
+            detail = f'{esc(r["n_stacks_carrying"])}/{esc(r["n_stacks"])} stacks · {esc(r["stacks_detail"])}'
         hold = ""
         if r["hold_until"]:
             hold = (f'<div class="note">{chip("held", "hold")} until {esc(fmt_ts(r["hold_until"]))} by {mono(r["hold_by"])} — {esc(r["hold_rationale"])}</div>')
@@ -389,7 +416,8 @@ def screen_grid(db, as_of):
             f'<b>{esc(r["stage"])}</b><div class="muted small">{esc(r["region"])} · {esc(r["owner"])}</div>',
             chip(st) + (f'<div class="small">{detail}</div>' if detail else "") + hold + drift,
             (f'{mono(r["desired"])}{candidate}<div class="muted small">{esc(fmt_ts(r["decided_at"]))} · {esc(r["decided_by"])}</div>' if r["desired"] else '<span class="muted">no decision yet</span>' + candidate),
-            (f'{mono(r["carried"])}<div class="muted small">since {esc(fmt_ts(r["carried_since"]))} · {esc(fmt_since(r["carried_since"], as_of))} · update #{esc(r["ops_update"])}</div>' if r["carried"] else '<span class="muted">nothing yet</span>'),
+            (f'{mono(r["carried"])}<div class="muted small">since {esc(fmt_ts(r["carried_since"]))} · {esc(fmt_since(r["carried_since"], as_of))} · update #{esc(r["ops_update"])}</div>' if r["carried"]
+             else (f'<span class="muted">mixed</span><div class="muted small">{esc(r["stacks_detail"])}</div>' if r["stacks_detail"] else '<span class="muted">nothing yet</span>')),
         ])
     body = table(["stage", "state (derived)", "should carry (intent)", "carries (observed)"], rows, "grid")
     return section("grid", "1 · the subject grid", "What is where, since when, waiting on whom",
@@ -633,7 +661,7 @@ def screen_releases(db, as_of):
 
 def screen_transitions(db, as_of):
     out = []
-    ts_ = q(db, "SELECT * FROM v_transition WHERE stack='service' AND (last_phase IS NOT NULL OR resource_steps > 0 OR outcome IN ('failed','abandoned')) ORDER BY started_at")
+    ts_ = q(db, "SELECT * FROM v_freight_transition WHERE last_phase IS NOT NULL OR resource_steps > 0 OR outcome IN ('failed','abandoned') ORDER BY started_at")
     for t in ts_:
         facts = q(db, "SELECT * FROM facts WHERE subject=? ORDER BY seq", t["transition"])
         rows = []
@@ -854,7 +882,10 @@ def main():
     ap.add_argument("--out", help="output page (default: out/<scenario>/index.html)")
     ap.add_argument("--as-of", action="append", help="render the ledger as of this instant (repeatable; first is primary)")
     ap.add_argument("--lint-only", action="store_true")
+    ap.add_argument("--pure", action="store_true", help="evaluate every view on demand instead of materialising per build (slow; must give the same page)")
     args = ap.parse_args()
+    global PURE
+    PURE = args.pure
 
     scenario = load_scenario(args.scenario)
     facts = load_facts(args.facts or os.path.join(HERE, "scenarios", args.scenario, "facts.jsonl"))

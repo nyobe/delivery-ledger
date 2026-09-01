@@ -93,8 +93,8 @@ IMAGES = ["api", "console", "jobs", "ratelimit", "workflow"]
 
 t0 = T(12, "15:00:00")
 intent(t0, "warehouse.declared", "warehouse:master", "user:priya",
-       {"repo": "pulumi/pulumi-service", "branch": "master", "images": IMAGES,
-        "config": "esc:pulumi/service (pinned version rides in the freight)", "via": VIA})
+       {"program": "pulumi-service", "repo": "pulumi/pulumi-service", "branch": "master", "images": IMAGES,
+        "stacks": ["service"], "config": "esc:pulumi/service (pinned version rides in the freight)", "via": VIA})
 
 STAGES = [
     ("testing",       {"order": 1, "region": "us-west-2",    "owner": "internal-tools", "slack": "#ops-notif-testing",
@@ -112,7 +112,8 @@ STAGES = [
                        "upstream": "production", "stacks": ["service", "workflow-pool", "workflow-ami"]}),
 ]
 for i, (name, p) in enumerate(STAGES):
-    intent(T(12, f"15:00:{i:02d}"), "stage.declared", f"stage:{name}", "user:priya", dict(p, display=name, via=VIA))
+    intent(T(12, f"15:00:{i:02d}"), "stage.declared", f"stage:{name}", "user:priya",
+           dict(p, display=name, program="pulumi-service", environment=name, via=VIA))
 
 POLICIES = [
     ("testing", "auto", "freight.discovered on warehouse:master", [],
@@ -171,7 +172,7 @@ def pr(number, title, author):
 
 def discovered(ts, freight, sha, images, config, prs, build):
     return observe(ts, "freight.discovered", f"freight:{freight}", "ci:gha",
-                   {"source": {"repo": "pulumi/pulumi-service", "sha": sha, "branch": "master"},
+                   {"warehouse": "master", "source": {"repo": "pulumi/pulumi-service", "sha": sha, "branch": "master"},
                     "images": images, "config": {"service": config}, "prs": prs, "build": build})
 
 
