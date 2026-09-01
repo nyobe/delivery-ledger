@@ -1,0 +1,1027 @@
+<title>Service Release Ledger</title>
+<meta name="description" content="pulumi-service's release train, rendered as queries over a two-class fact ledger">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:ital,wght@0,400;0,600;1,400&family=Source+Serif+4:opsz,wght@8..60,600&display=swap">
+<style>
+:root {
+  --ground: #f5f6f2; --paper: #ffffff; --ink: #1c2126; --muted: #5f6a73; --rule: #d8ddd5; --rule-soft: #e8ebe4;
+  --accent: #1f6a86; --accent-ink: #ffffff; --accent-tint: #e3eff4;
+  --ok: #2b7a4b; --ok-tint: #e2f1e6; --amber: #9a6a12; --amber-tint: #f7ecd2; --bad: #a8412a; --bad-tint: #f7e3dd;
+  --hold: #66707a; --hold-tint: #e9ecee; --live: #4b5fb5; --live-tint: #e5e9f7; --obs-tint: #eef0eb;
+  --code: #2a3138;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #15191c; --paper: #1d2226; --ink: #e4e8e2; --muted: #98a3ab; --rule: #2d353b; --rule-soft: #262d32;
+    --accent: #6fb6d0; --accent-ink: #0f1d24; --accent-tint: #1b2f38;
+    --ok: #74c58f; --ok-tint: #1c3325; --amber: #e2b04a; --amber-tint: #3a2e14; --bad: #ea8a70; --bad-tint: #3d2219;
+    --hold: #9aa5ad; --hold-tint: #2a3238; --live: #9eaee9; --live-tint: #232a44; --obs-tint: #232a2e;
+    --code: #d6dbd2;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #15191c; --paper: #1d2226; --ink: #e4e8e2; --muted: #98a3ab; --rule: #2d353b; --rule-soft: #262d32;
+  --accent: #6fb6d0; --accent-ink: #0f1d24; --accent-tint: #1b2f38;
+  --ok: #74c58f; --ok-tint: #1c3325; --amber: #e2b04a; --amber-tint: #3a2e14; --bad: #ea8a70; --bad-tint: #3d2219;
+  --hold: #9aa5ad; --hold-tint: #2a3238; --live: #9eaee9; --live-tint: #232a44; --obs-tint: #232a2e;
+  --code: #d6dbd2;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--ground); color: var(--ink); font: 15px/1.5 "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif; }
+a { color: var(--accent); }
+code, pre, .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+code { font-size: 0.92em; color: var(--code); background: var(--obs-tint); padding: 0 .3em; border-radius: 3px; }
+h1, h2, h3 { font-family: "Source Serif 4", Georgia, "Times New Roman", serif; font-weight: 600; text-wrap: balance; letter-spacing: -0.01em; }
+h1 { font-size: 2.1rem; line-height: 1.15; margin: 0 0 .4rem; }
+h2 { font-size: 1.45rem; margin: .15rem 0 .5rem; }
+h3 { font-size: 1.05rem; margin: 1.2rem 0 .2rem; }
+.page { max-width: 1180px; margin: 0 auto; padding: 2.5rem 1.5rem 5rem; }
+header.masthead { display: grid; grid-template-columns: 1fr auto; gap: 1.5rem 3rem; align-items: end; padding-bottom: 1.25rem; border-bottom: 2px solid var(--ink); margin-bottom: 1rem; }
+.masthead .kicker { font-size: .78rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: .5rem; }
+.masthead p.thesis { max-width: 62ch; margin: .4rem 0 0; color: var(--muted); font-size: 1rem; }
+.clock { text-align: right; font-variant-numeric: tabular-nums; }
+.clock .label { font-size: .78rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.clock .now { font-family: "IBM Plex Mono", monospace; font-size: 1.05rem; }
+nav.snaps { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 2.25rem; }
+nav.snaps button { font: inherit; font-size: .86rem; padding: .45rem .8rem; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); border-radius: 4px; cursor: pointer; text-align: left; }
+nav.snaps button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-tint); }
+nav.snaps button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+nav.snaps button .t { font-family: "IBM Plex Mono", monospace; display: block; font-size: .8rem; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; font-size: .82rem; color: var(--muted); margin: -1.5rem 0 2rem; }
+section { margin: 0 0 3.25rem; }
+.eyebrow { font-size: .74rem; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+p.blurb { max-width: 72ch; color: var(--muted); margin: 0 0 1rem; }
+p.lede { max-width: 80ch; margin: 0 0 .9rem; }
+.scroll { overflow-x: auto; background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 600; font-size: .74rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: .6rem .75rem; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: .6rem .75rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td.empty { color: var(--muted); font-style: italic; }
+.small { font-size: .82rem; }
+.muted { color: var(--muted); }
+.amber-text { color: var(--amber); }
+.reached { white-space: nowrap; }
+.chip { display: inline-flex; align-items: center; gap: .35em; padding: .1em .55em .1em .45em; border-radius: 999px; font-size: .8rem; font-weight: 600; white-space: nowrap; line-height: 1.5; }
+.chip.tiny { font-size: .7rem; padding: 0 .45em 0 .35em; }
+.chip .glyph { font-size: .95em; }
+.chip.ok { color: var(--ok); background: var(--ok-tint); }
+.chip.amber { color: var(--amber); background: var(--amber-tint); }
+.chip.bad { color: var(--bad); background: var(--bad-tint); }
+.chip.hold { color: var(--hold); background: var(--hold-tint); }
+.chip.live { color: var(--live); background: var(--live-tint); }
+.cls { display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: .72rem; letter-spacing: .04em; padding: .05em .45em; border-radius: 3px; }
+.cls.intent { color: var(--accent); background: var(--accent-tint); border: 1px solid var(--accent); }
+.cls.observation { color: var(--muted); background: var(--obs-tint); border: 1px solid var(--rule); }
+.note { margin-top: .35rem; font-size: .82rem; }
+.note.drift { color: var(--bad); }
+.callout { margin: 1rem 0 .5rem; padding: .8rem 1rem; border-left: 3px solid var(--accent); background: var(--paper); border-radius: 0 6px 6px 0; font-size: .92rem; }
+a.fact { font-family: "IBM Plex Mono", monospace; font-size: .78rem; text-decoration: none; border-bottom: 1px dotted var(--accent); }
+a.preview { font-family: "IBM Plex Mono", monospace; font-size: .8rem; }
+.payload { font-family: "IBM Plex Mono", monospace; font-size: .74rem; color: var(--muted); max-width: 46ch; overflow-wrap: anywhere; }
+details.sql { margin-top: .6rem; }
+details.sql summary { cursor: pointer; font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+details.sql pre { margin: .5rem 0 0; padding: .9rem 1rem; background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; font-size: .78rem; line-height: 1.45; overflow-x: auto; color: var(--code); }
+.snapshot[hidden] { display: none; }
+footer { border-top: 1px solid var(--rule); padding-top: 1rem; color: var(--muted); font-size: .82rem; max-width: 72ch; }
+@media (max-width: 720px) { header.masthead { grid-template-columns: 1fr; } .clock { text-align: left; } }
+@media (prefers-reduced-motion: no-preference) { nav.snaps button { transition: border-color .15s ease, background .15s ease; } }
+</style>
+<div class="page">
+<header class="masthead">
+  <div>
+    <div class="kicker">pulumi-service · delivery ledger · fixture</div>
+    <h1>Service Release Ledger</h1>
+    <p class="thesis">The release tracker, derived: every screen below is a query over one append-only table of
+    attributed facts — <span class="cls intent">intent</span> (decisions, approvals, holds, break-glass) and
+    <span class="cls observation">observation</span> (enactments, verifications, plans, conformance reads).
+    Nothing is stored as status.</p>
+  </div>
+  <div class="clock"><div class="label">ledger as of</div><div class="now">2026-08-26T11:45:00Z</div></div>
+</header>
+<nav class="snaps" aria-label="ledger snapshots"><button type="button" data-asof="2026-08-26T11:45:00Z" aria-pressed="true">Wed 11:45 — F418 waiting on oncall; production drifted since Monday night<span class="t">2026-08-26T11:45:00Z</span></button><button type="button" data-asof="2026-08-24T10:20:00Z" aria-pressed="false">Mon 10:20 — F417 mid-rollout to production, both versions live<span class="t">2026-08-24T10:20:00Z</span></button><button type="button" data-asof="2026-08-24T10:50:00Z" aria-pressed="false">Mon 10:50 — production-eu holding F417 for approval: the plan touches a migration<span class="t">2026-08-24T10:50:00Z</span></button></nav>
+<div class="legend"><span>● converged</span><span>○ awaiting (nothing running)</span><span>◌ in flight</span><span>⊘ hold</span><span>⚠ drift</span><span>✕ failed</span><span>fact ids link into the ledger tail</span></div>
+<div class="snapshot" data-asof="2026-08-26T11:45:00Z"><section id="grid"><div class="eyebrow">1 · the subject grid</div><h2>What is where, since when, waiting on whom</h2><p class="blurb">One row per stage. <em>Should carry</em> is the latest promotion decision; <em>carries</em> is the latest enactment that finished; the state column is a join of the two with the gate evaluation, the active holds, and the last conformance read. Nothing in the state column is stored.</p><div class="scroll"><table class="grid"><thead><tr><th>stage</th><th>state (derived)</th><th>should carry (intent)</th><th>carries (observed)</th></tr></thead><tbody><tr><td><b>testing</b><div class="muted small">us-west-2 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F419</code><div class="muted small">Wed Aug 26 10:03 · policy:testing</div></td><td><code>F419</code><div class="muted small">since Wed Aug 26 10:31 · 1h 14m · update #6231</div></td></tr><tr><td><b>testing-eu</b><div class="muted small">eu-central-1 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F419</code><div class="muted small">Wed Aug 26 10:03 · policy:testing-eu</div></td><td><code>F419</code><div class="muted small">since Wed Aug 26 10:28 · 1h 17m · update #5134</div></td></tr><tr><td><b>staging</b><div class="muted small">us-west-2 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F418</code><div class="muted small">Wed Aug 26 09:01 · policy:staging</div></td><td><code>F418</code><div class="muted small">since Wed Aug 26 09:17 · 2h 28m · update #1421</div></td></tr><tr><td><b>production</b><div class="muted small">us-west-2 · internal-tools</div></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span><div class="small">approval: oncall (merge release PR) · <b>2h 10m</b> (since Wed Aug 26 09:35)</div><div class="note drift"><span class="glyph">⚠</span> observed api@F416 — break-glass INC-2311 (f073) · read Wed Aug 26 11:30</div></td><td><code>F417</code> <span class="muted">→ F418 offered</span><div class="muted small">Mon Aug 24 10:05 · policy:production</div></td><td><code>F417</code><div class="muted small">since Mon Aug 24 10:31 · 2d 1h · update #3184</div></td></tr><tr><td><b>production-eu</b><div class="muted small">eu-central-1 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span><div class="note"><span class="chip hold"><span class="glyph">⊘</span>hold</span> until Wed Aug 26 14:00 by <code>user:priya</code> — EU maintenance window: RDS minor version upgrade in progress; no rollouts until 14:00 UTC</div></td><td><code>F417</code><div class="muted small">Mon Aug 24 11:02 · policy:production-eu</div></td><td><code>F417</code><div class="muted small">since Mon Aug 24 11:19 · 2d 0h · update #2071</div></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_grid AS
+SELECT s.ord, s.stage, s.region, s.owner, s.url, s.ops,
+       d.freight        AS desired,
+       d.decided_at,
+       d.decided_by,
+       k.freight        AS carried,
+       k.since          AS carried_since,
+       k.ops_update,
+       i.transition     AS inflight,
+       i.last_phase,
+       ge.freight       AS candidate,
+       ge.awaiting,
+       ge.awaiting_since,
+       ge.held_until,
+       CASE
+         WHEN i.transition IS NOT NULL                             THEN &#x27;in-flight&#x27;
+         WHEN lf.outcome = &#x27;failed&#x27; AND d.freight &lt;&gt; k.freight     THEN &#x27;failed&#x27;
+         WHEN ge.freight IS NOT NULL AND ge.freight &lt;&gt; d.freight
+              AND ge.held_until IS NOT NULL                        THEN &#x27;held&#x27;
+         WHEN ge.freight IS NOT NULL AND ge.freight &lt;&gt; d.freight
+              AND ge.passes = 0                                    THEN &#x27;awaiting&#x27;
+         WHEN ge.freight IS NOT NULL AND ge.freight &lt;&gt; d.freight
+              AND ge.passes = 1                                    THEN &#x27;ready&#x27;
+         WHEN d.freight = k.freight                                THEN &#x27;converged&#x27;
+         ELSE &#x27;pending&#x27;
+       END AS status,
+       CASE WHEN o.mismatches &gt; 0 THEN
+         o.mismatch_detail ||
+         CASE WHEN bg.fact IS NOT NULL
+              THEN &#x27; — break-glass &#x27; || bg.incident || &#x27; (&#x27; || bg.fact || &#x27;)&#x27;
+              ELSE &#x27; — UNEXPLAINED&#x27; END
+       END AS drift,
+       o.ts AS observed_at,
+       h.until_ts AS hold_until, h.actor AS hold_by, h.rationale AS hold_rationale
+FROM v_stage s
+LEFT JOIN v_desired       d  ON d.stage  = s.stage
+LEFT JOIN v_carried       k  ON k.stage  = s.stage
+LEFT JOIN v_inflight      i  ON i.stage  = s.stage AND i.stack = &#x27;service&#x27;
+LEFT JOIN v_last_finished lf ON lf.stage = s.stage
+LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
+LEFT JOIN v_observed      o  ON o.stage  = s.stage
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_hold          h  ON h.stage  = s.stage
+ORDER BY s.ord;
+
+CREATE VIEW v_gate_eval AS
+SELECT g.*, c.available_at,
+  CASE g.stage
+    WHEN &#x27;testing&#x27;       THEN 1
+    WHEN &#x27;testing-eu&#x27;    THEN 1
+    WHEN &#x27;staging&#x27;       THEN (g.upstream_integration_at IS NOT NULL)
+    WHEN &#x27;production&#x27;    THEN (g.upstream_integration_at IS NOT NULL
+                               AND g.staging_smoke_at IS NOT NULL
+                               AND g.staging_loadgen_at IS NOT NULL
+                               AND g.approved_at IS NOT NULL)
+    WHEN &#x27;production-eu&#x27; THEN (g.upstream_carried_at IS NOT NULL
+                               AND g.upstream_integration_at IS NOT NULL
+                               AND g.held_until IS NULL
+                               AND (g.plan_safe = 1 OR g.approved_at IS NOT NULL))
+  END AS passes,
+  CASE g.stage
+    WHEN &#x27;staging&#x27; THEN
+      CASE WHEN g.upstream_integration_at IS NULL THEN &#x27;verification: integration-tests in testing&#x27; END
+    WHEN &#x27;production&#x27; THEN
+      CASE WHEN g.upstream_integration_at IS NULL THEN &#x27;verification: integration-tests in staging&#x27;
+           WHEN g.staging_smoke_at IS NULL        THEN &#x27;verification: smoke in staging&#x27;
+           WHEN g.staging_loadgen_at IS NULL      THEN &#x27;verification: load-generator in staging&#x27;
+           WHEN g.approved_at IS NULL             THEN &#x27;approval: oncall (merge release PR)&#x27; END
+    WHEN &#x27;production-eu&#x27; THEN
+      CASE WHEN g.upstream_carried_at IS NULL     THEN &#x27;production to carry &#x27; || g.freight
+           WHEN g.upstream_integration_at IS NULL THEN &#x27;verification: integration-tests in production&#x27;
+           WHEN g.held_until IS NOT NULL          THEN &#x27;hold until &#x27; || g.held_until
+           WHEN g.plan_safe IS NULL               THEN &#x27;plan for production-eu&#x27;
+           WHEN g.plan_safe = 0 AND g.approved_at IS NULL
+                                                  THEN &#x27;approval: oncall (plan not safe: migrations or destructive steps)&#x27; END
+  END AS awaiting,
+  max(coalesce(c.available_at, &#x27;&#x27;),
+      coalesce(g.upstream_integration_at, &#x27;&#x27;),
+      coalesce(g.staging_smoke_at, &#x27;&#x27;),
+      coalesce(g.staging_loadgen_at, &#x27;&#x27;),
+      coalesce(g.upstream_carried_at, &#x27;&#x27;)) AS awaiting_since
+FROM v_gate_all g
+JOIN v_candidate c ON c.stage = g.stage AND c.freight = g.freight;
+
+CREATE VIEW v_candidate AS
+SELECT s.stage,
+  CASE
+    WHEN s.upstream = &#x27;warehouse:master&#x27; THEN
+      (SELECT fr.freight FROM v_freight fr WHERE fr.branch = &#x27;master&#x27; ORDER BY fr.discovered_at DESC LIMIT 1)
+    WHEN s.upstream = &#x27;release-train&#x27; THEN
+      (SELECT fr.freight FROM v_freight fr WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC LIMIT 1)
+    ELSE
+      (SELECT k.freight FROM v_carried k WHERE k.stage = s.upstream)
+  END AS freight,
+  CASE
+    WHEN s.upstream = &#x27;warehouse:master&#x27; THEN
+      (SELECT fr.discovered_at FROM v_freight fr WHERE fr.branch = &#x27;master&#x27; ORDER BY fr.discovered_at DESC LIMIT 1)
+    WHEN s.upstream = &#x27;release-train&#x27; THEN
+      (SELECT fr.cut_at FROM v_freight fr WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC LIMIT 1)
+    ELSE
+      (SELECT k.since FROM v_carried k WHERE k.stage = s.upstream)
+  END AS available_at
+FROM v_stage s;</pre></details></section><section id="lanes"><div class="eyebrow">1 · freight lanes</div><h2>Freight × stage</h2><p class="blurb">Each freight runs vertically through the stages it has reached. A cell is the time the enactment finished there, or what the freight is waiting on to get there. The same content-keyed freight moves through every stage — the testing build <em>is</em> the release.</p><div class="scroll"><table class="lanes"><thead><tr><th>freight</th><th>testing</th><th>testing-eu</th><th>staging</th><th>production</th><th>production-eu</th></tr></thead><tbody><tr><td><b>F419</b><div class="muted small">master build · Wed Aug 26 10:02 · no release yet</div></td><td><span class="reached">Wed Aug 26 10:31</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="reached">Wed Aug 26 10:28</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td></tr><tr><td><b>F418</b><div class="muted small">release PR #14882 · cut Wed Aug 26 09:00</div></td><td><span class="reached">Tue Aug 25 22:41</span></td><td><span class="reached">Tue Aug 25 22:39</span></td><td><span class="reached">Wed Aug 26 09:17</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span><div class="small">approval: oncall (merge release PR)<br><span class="muted">2h 10m</span></div></td><td><span class="muted">—</span></td></tr><tr><td><b>F417</b><div class="muted small">release PR #14876 · cut Mon Aug 24 09:00</div></td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="reached">Mon Aug 24 10:31</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="reached">Mon Aug 24 11:19</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td></tr><tr><td><b>F416</b><div class="muted small">release PR #14870 · cut Tue Aug 18 09:00</div></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="reached">Tue Aug 18 09:18</span></td><td><span class="reached">Tue Aug 18 10:34</span></td><td><span class="reached">Tue Aug 18 11:05</span></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_lanes AS
+SELECT fr.freight, fr.release_pr, fr.cut_at, fr.discovered_at, s.stage, s.ord,
+  (SELECT min(t.finished_at) FROM v_transition t
+    WHERE t.stage = s.stage AND t.freight = fr.freight
+      AND t.stack = &#x27;service&#x27; AND t.outcome = &#x27;succeeded&#x27;)       AS reached_at,
+  (SELECT t.started_at FROM v_transition t
+    WHERE t.stage = s.stage AND t.freight = fr.freight
+      AND t.stack = &#x27;service&#x27; AND t.finished_at IS NULL)         AS inflight_since,
+  CASE WHEN ge.freight = fr.freight AND ge.passes = 0
+        AND (d.freight IS NULL OR d.freight &lt;&gt; fr.freight)
+       THEN ge.awaiting END                                      AS awaiting,
+  CASE WHEN ge.freight = fr.freight AND ge.passes = 0
+        AND (d.freight IS NULL OR d.freight &lt;&gt; fr.freight)
+       THEN ge.awaiting_since END                                AS awaiting_since,
+  (k.freight = fr.freight)                                       AS is_current
+FROM v_freight fr
+CROSS JOIN v_stage s
+LEFT JOIN v_gate_eval ge ON ge.stage = s.stage
+LEFT JOIN v_desired   d  ON d.stage  = s.stage
+LEFT JOIN v_carried   k  ON k.stage  = s.stage;</pre></details></section><section id="awaiting"><div class="eyebrow">2 · awaiting ≠ failure</div><h2>Production is waiting, not broken</h2><p class="blurb">The gate is a query joining both fact classes, evaluated at rest. What it lacks is an approval fact; until one arrives the stage is <em>awaiting</em>, rendered as an honest open item with a duration — not as a failed run. Suspending holds no compute: there is no runner parked on this.</p><p class="lede">Candidate <code>F418</code> for <b>production</b> (policy: gated). Gate <code>verified(staging, F, &#x27;integration-tests&#x27;) AND verified(staging, F, &#x27;smoke&#x27;) AND verified(staging, F, &#x27;load-generator&#x27;) AND approved(production, F, role = &#x27;oncall&#x27;)</code> does not pass — awaiting <b>approval: oncall (merge release PR)</b> since Wed Aug 26 09:35 (2h 10m).</p><div class="scroll"><table class=""><thead><tr><th></th><th>requirement</th><th>satisfied at</th><th>evidence</th></tr></thead><tbody><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>verified in staging: integration-tests</td><td>Wed Aug 26 09:29</td><td>412 tests, 0 failures <a class="fact" href="#f093">f093</a></td></tr><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>verified in staging: smoke</td><td>Wed Aug 26 09:31</td><td>deploy-smoke-test green <a class="fact" href="#f094">f094</a></td></tr><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>verified in staging: load-generator</td><td>Wed Aug 26 09:35</td><td>100% success over 10m <a class="fact" href="#f095">f095</a></td></tr><tr><td><span class="chip amber"><span class="glyph">○</span>open</span></td><td>approved by oncall (merge of the release PR)</td><td><span class="muted">— waiting 2h 10m</span></td><td>nothing running while it waits</td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_gate_all AS
+SELECT s.stage, fr.freight, p.mode, p.rule,
+  (SELECT v.ts FROM v_verified v
+    WHERE v.stage = s.verify_in AND v.freight = fr.freight
+      AND v.chk = &#x27;integration-tests&#x27; AND v.outcome = &#x27;pass&#x27;)  AS upstream_integration_at,
+  (SELECT v.ts FROM v_verified v
+    WHERE v.stage = &#x27;staging&#x27; AND v.freight = fr.freight
+      AND v.chk = &#x27;smoke&#x27; AND v.outcome = &#x27;pass&#x27;)              AS staging_smoke_at,
+  (SELECT v.ts FROM v_verified v
+    WHERE v.stage = &#x27;staging&#x27; AND v.freight = fr.freight
+      AND v.chk = &#x27;load-generator&#x27; AND v.outcome = &#x27;pass&#x27;)     AS staging_loadgen_at,
+  (SELECT k.since FROM v_carried k
+    WHERE k.stage = s.upstream AND k.freight = fr.freight)      AS upstream_carried_at,
+  (SELECT a.ts FROM v_approval a
+    WHERE a.stage = s.stage AND a.freight = fr.freight)         AS approved_at,
+  (SELECT a.actor FROM v_approval a
+    WHERE a.stage = s.stage AND a.freight = fr.freight)         AS approved_by,
+  (SELECT a.fact FROM v_approval a
+    WHERE a.stage = s.stage AND a.freight = fr.freight)         AS approval_fact,
+  (SELECT pl.safe FROM v_plan pl
+    WHERE pl.stage = s.stage AND pl.freight = fr.freight)       AS plan_safe,
+  (SELECT pl.migrations_changed FROM v_plan pl
+    WHERE pl.stage = s.stage AND pl.freight = fr.freight)       AS migrations_changed,
+  (SELECT pl.fact FROM v_plan pl
+    WHERE pl.stage = s.stage AND pl.freight = fr.freight)       AS plan_fact,
+  (SELECT h.until_ts FROM v_hold h WHERE h.stage = s.stage)     AS held_until,
+  (SELECT h.fact FROM v_hold h WHERE h.stage = s.stage)         AS hold_fact
+FROM v_stage s
+CROSS JOIN v_freight fr
+JOIN v_policy p ON p.stage = s.stage;</pre></details></section><section id="trace"><div class="eyebrow">3 · where is my change</div><h2>PR → freight → stages</h2><p class="blurb">Keith's tracker reconstructs this by mining CI logs and commit subjects. Here it is a join: the freight names its PRs, the lanes say where the freight is. A PR merged after the cut is not <em>unreleased</em> — it is in testing, with a timestamp, because testing is a stage.</p><div class="scroll"><table class="trace"><thead><tr><th>change</th><th>where is it</th><th>testing</th><th>testing-eu</th><th>staging</th><th>production</th><th>production-eu</th></tr></thead><tbody><tr><td><b>#46181</b> Console: fix stack list pagination<div class="muted small">jonas · F419</div></td><td>in <b>testing-eu</b> since Wed Aug 26 10:28<div class="small muted">not in a release yet (next cut picks it up)</div></td><td><span class="reached">Wed Aug 26 10:31</span></td><td><span class="reached">Wed Aug 26 10:28</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td></tr><tr><td><b>#46173</b> Fix rate limiter key collision (INC-2311)<div class="muted small">amina · F418 · release PR #14882</div></td><td>in <b>staging</b> since Wed Aug 26 09:17<div class="small amber-text">next — production: approval: oncall (merge release PR)</div></td><td><span class="reached">Tue Aug 25 22:41</span></td><td><span class="reached">Tue Aug 25 22:39</span></td><td><span class="reached">Wed Aug 26 09:17</span></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span></td><td><span class="muted">—</span></td></tr><tr><td><b>#46170</b> Add index for stack tags lookup<div class="muted small">jonas · F418 · release PR #14882</div></td><td>in <b>staging</b> since Wed Aug 26 09:17<div class="small amber-text">next — production: approval: oncall (merge release PR)</div></td><td><span class="reached">Tue Aug 25 22:41</span></td><td><span class="reached">Tue Aug 25 22:39</span></td><td><span class="reached">Wed Aug 26 09:17</span></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span></td><td><span class="muted">—</span></td></tr><tr><td><b>#46168</b> Bump pulumi CLI to 3.212.0<div class="muted small">priya · F418 · release PR #14882</div></td><td>in <b>staging</b> since Wed Aug 26 09:17<div class="small amber-text">next — production: approval: oncall (merge release PR)</div></td><td><span class="reached">Tue Aug 25 22:41</span></td><td><span class="reached">Tue Aug 25 22:39</span></td><td><span class="reached">Wed Aug 26 09:17</span></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span></td><td><span class="muted">—</span></td></tr><tr><td><b>#46140</b> Bump workflow image to 2026.08.21<div class="muted small">priya · F417 · release PR #14876</div></td><td>in <b>production-eu</b> since Mon Aug 24 11:19</td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="reached">Mon Aug 24 10:31</span></td><td><span class="reached">Mon Aug 24 11:19</span></td></tr><tr><td><b>#46133</b> Tighten rate limits on /api/stacks<div class="muted small">amina · F417 · release PR #14876</div></td><td>in <b>production-eu</b> since Mon Aug 24 11:19</td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="reached">Mon Aug 24 10:31</span></td><td><span class="reached">Mon Aug 24 11:19</span></td></tr><tr><td><b>#46120</b> Migrate stack tags to new table<div class="muted small">jonas · F417 · release PR #14876</div></td><td>in <b>production-eu</b> since Mon Aug 24 11:19</td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="reached">Mon Aug 24 10:31</span></td><td><span class="reached">Mon Aug 24 11:19</span></td></tr><tr><td><b>#46101</b> Jobs: retry webhook deliveries with backoff<div class="muted small">jonas · F416 · release PR #14870</div></td><td>in <b>production-eu</b> since Tue Aug 18 11:05</td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="reached">Tue Aug 18 09:18</span></td><td><span class="reached">Tue Aug 18 10:34</span></td><td><span class="reached">Tue Aug 18 11:05</span></td></tr><tr><td><b>#46098</b> Console: new stack list empty state<div class="muted small">amina · F416 · release PR #14870</div></td><td>in <b>production-eu</b> since Tue Aug 18 11:05</td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="reached">Tue Aug 18 09:18</span></td><td><span class="reached">Tue Aug 18 10:34</span></td><td><span class="reached">Tue Aug 18 11:05</span></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_trace AS
+SELECT json_extract(pr.value, &#x27;$.number&#x27;) AS pr,
+       json_extract(pr.value, &#x27;$.title&#x27;)  AS title,
+       json_extract(pr.value, &#x27;$.author&#x27;) AS author,
+       fr.freight, fr.release_pr,
+       l.stage, l.ord, l.reached_at, l.inflight_since, l.awaiting, l.awaiting_since, l.is_current
+FROM v_freight fr, json_each(fr.prs) pr
+JOIN v_lanes l ON l.freight = fr.freight;
+
+CREATE VIEW v_trace_summary AS
+SELECT t.pr, t.title, t.author, t.freight, t.release_pr,
+  (SELECT t2.stage FROM v_trace t2 WHERE t2.pr = t.pr AND t2.reached_at IS NOT NULL
+     ORDER BY t2.ord DESC LIMIT 1)                               AS furthest_stage,
+  (SELECT t2.reached_at FROM v_trace t2 WHERE t2.pr = t.pr AND t2.reached_at IS NOT NULL
+     ORDER BY t2.ord DESC LIMIT 1)                               AS furthest_at,
+  (SELECT t2.stage || &#x27;: &#x27; || t2.awaiting || &#x27; (since &#x27; || t2.awaiting_since || &#x27;)&#x27;
+     FROM v_trace t2 WHERE t2.pr = t.pr AND t2.awaiting IS NOT NULL
+     ORDER BY t2.ord LIMIT 1)                                    AS next,
+  CASE WHEN t.release_pr IS NULL THEN &#x27;not in a release yet (next cut picks it up)&#x27; END AS note
+FROM v_trace t
+GROUP BY t.pr;</pre></details></section><section id="diffgate"><div class="eyebrow">4 · a diff-gate</div><h2>"If migrations changed, require approval; otherwise fast-track"</h2><p class="blurb">Joe's question, answered as a query: the plan is a fact (stage 3 of the key decomposition — desired × world at T), so a gate can read it. Three freights, same rule, three different outcomes. The rule is evaluable before the freight is even a candidate — the plan for F418 was computed ahead.</p><p class="lede">production-eu policy: <code>carried(production, F) AND verified(production, F, &#x27;integration-tests&#x27;) AND NOT held(production-eu) AND (plan(production-eu, F).safe OR approved(production-eu, F, role = &#x27;oncall&#x27;))</code><br>where <em>safe</em> = <code>plan.delete = 0 AND plan.replace = 0 AND NOT plan.migrations_changed</code></p><div class="scroll"><table class=""><thead><tr><th>freight</th><th>plan for production-eu</th><th>upstream</th><th>gate outcome</th></tr></thead><tbody><tr><td><code>F416</code></td><td>+1 ~9 −0 ±0 <a class="fact" href="#f027">f027</a><div class="small muted">against F415</div></td><td><span class="muted">production does not carry it yet</span></td><td><span class="chip ok"><span class="glyph">▸</span>auto</span><div class="small">safe plan — no approval needed</div></td></tr><tr><td><code>F417</code></td><td>+3 ~11 −0 ±0 <a class="fact" href="#f067">f067</a><div class="small muted">against F416</div><div class="small"><span class="glyph">⚠</span> migrations: 20260821_stack_tags.sql</div></td><td>production carried it Mon Aug 24 10:31</td><td><span class="chip ok"><span class="glyph">✓</span>approved</span><div class="small">not safe → required oncall; user:maya at Mon Aug 24 11:02 <a class="fact" href="#f068">f068</a></div></td></tr><tr><td><code>F418</code></td><td>+2 ~14 −0 ±0 <a class="fact" href="#f097">f097</a><div class="small muted">against F417</div><div class="small"><span class="glyph">⚠</span> migrations: 20260825_stack_tags_index.sql</div></td><td><span class="muted">production does not carry it yet</span></td><td><span class="chip amber"><span class="glyph">○</span>would require approval</span><div class="small">not safe — evaluated ahead of candidacy</div></td></tr><tr><td><code>F419</code></td><td><span class="muted">no plan yet</span></td><td><span class="muted">production does not carry it yet</span></td><td><span class="muted">not evaluable — plan missing</span></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_plan AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, &#x27;$.freight&#x27;)         AS freight,
+       json_extract(f.payload, &#x27;$.against&#x27;)         AS against,
+       json_extract(f.payload, &#x27;$.create&#x27;)          AS n_create,
+       json_extract(f.payload, &#x27;$.update&#x27;)          AS n_update,
+       json_extract(f.payload, &#x27;$.delete&#x27;)          AS n_delete,
+       json_extract(f.payload, &#x27;$.replace&#x27;)         AS n_replace,
+       json_extract(f.payload, &#x27;$.migrations_changed&#x27;) AS migrations_changed,
+       json_extract(f.payload, &#x27;$.migrations&#x27;)      AS migrations,
+       (json_extract(f.payload, &#x27;$.delete&#x27;) = 0
+        AND json_extract(f.payload, &#x27;$.replace&#x27;) = 0
+        AND NOT json_extract(f.payload, &#x27;$.migrations_changed&#x27;)) AS safe,
+       f.ts, f.id                                   AS fact
+FROM facts f
+WHERE f.kind = &#x27;plan.summarized&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;plan.summarized&#x27; AND g.subject = f.subject
+                AND json_extract(g.payload, &#x27;$.freight&#x27;) = json_extract(f.payload, &#x27;$.freight&#x27;));</pre></details></section><section id="uptake"><div class="eyebrow">5 · a pending uptake</div><h2>Publication is evidence; uptake is intent</h2><p class="blurb">The AMI bake published a new record. The worker pool's binding declares a gated uptake, so the grid shows <em>available, gated</em> with a preview — instead of an instance refresh nobody decided on. Blast radius is <code>consumers WHERE pending</code>: one.</p><div class="scroll"><table class=""><thead><tr><th>consumer · binding</th><th>published (evidence)</th><th>taken up (intent)</th><th>state</th></tr></thead><tbody><tr><td><b>workflow-pool@production</b><div class="small muted">ami_id ← workflow-ami@production</div></td><td>v13 <code>ami-0f3c9e8b7a6d5c412</code><div class="small muted">published Wed Aug 26 07:30 <a class="fact" href="#f083">f083</a></div></td><td>v12<div class="small muted">Wed Aug 19 09:30 · user:priya</div></td><td><span class="chip amber"><span class="glyph">○</span>v13 available, gated</span><div class="small">since Wed Aug 26 07:30 · 4h 15m · <a href="#" class="preview">preview workflow-pool@production with ami_id = ami-0f3c9e8b7a6d5c412</a></div><div class="small muted">An instance refresh drains the hot pool. Approve the trigger; never auto-uptake.</div></td></tr><tr><td><b>workflow-pool@production-eu</b><div class="small muted">ami_id ← workflow-ami@production-eu</div></td><td>v9 <code>ami-0c58e1f7a2d4b9c03</code><div class="small muted">published Wed Aug 19 08:10 <a class="fact" href="#f033">f033</a></div></td><td>v9<div class="small muted">Wed Aug 19 10:05 · user:priya</div></td><td><span class="chip ok"><span class="glyph">●</span>current at v9</span><div class="small muted">Same as US: approve the trigger.</div></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_pending_uptake AS
+SELECT e.consumer, e.producer, e.key, e.uptake AS policy,
+       r.version                                              AS published_version,
+       r.ts                                                   AS published_at,
+       json_extract(r.payload, &#x27;$.values.&#x27; || e.key)          AS published_value,
+       r.fact                                                 AS published_fact,
+       u.version                                              AS consumed_version,
+       u.ts                                                   AS consumed_at,
+       u.actor                                                AS consumed_by,
+       (r.version &gt; coalesce(u.version, 0))                   AS pending,
+       &#x27;preview &#x27; || e.consumer || &#x27; with &#x27; || e.key || &#x27; = &#x27;
+         || json_extract(r.payload, &#x27;$.values.&#x27; || e.key)     AS preview,
+       e.description
+FROM v_edge e
+LEFT JOIN v_record  r ON r.producer = e.producer
+LEFT JOIN v_uptaken u ON u.edge = e.edge;
+
+CREATE VIEW v_record AS
+SELECT substr(f.subject, 8)                         AS producer,
+       json_extract(f.payload, &#x27;$.version&#x27;)         AS version,
+       f.payload                                    AS payload,
+       json_extract(f.payload, &#x27;$.produced_by&#x27;)     AS produced_by,
+       f.ts, f.id                                   AS fact
+FROM facts f
+WHERE f.kind = &#x27;output.published&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;output.published&#x27; AND g.subject = f.subject);
+
+CREATE VIEW v_uptaken AS
+SELECT f.subject                                    AS edge,
+       json_extract(f.payload, &#x27;$.record_version&#x27;)  AS version,
+       f.actor, f.ts, f.rationale, f.id             AS fact
+FROM facts f
+WHERE f.kind = &#x27;uptake.decided&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;uptake.decided&#x27; AND g.subject = f.subject);</pre></details></section><section id="oob"><div class="eyebrow">the side door</div><h2>Out-of-band reality, recorded</h2><p class="blurb">Monday night oncall rolled one ECS service back by hand. The watch saw it; the break-glass fact explains it. Drift with no such fact would render as <em>UNEXPLAINED</em>.</p><p class="lede">Latest conformance read of production, Wed Aug 26 11:30 (ecs describe-services, task-definition SHA tags) <a class="fact" href="#f106">f106</a>.</p><div class="scroll"><table class=""><thead><tr><th>service</th><th>should run</th><th>runs</th><th></th></tr></thead><tbody><tr><td><code>api</code></td><td><code>F417</code></td><td><code>F416</code></td><td><span class="chip bad"><span class="glyph">⚠</span>differs</span></td></tr><tr><td><code>console</code></td><td><code>F417</code></td><td><code>F417</code></td><td><span class="chip ok"><span class="glyph">●</span>matches</span></td></tr><tr><td><code>jobs</code></td><td><code>F417</code></td><td><code>F417</code></td><td><span class="chip ok"><span class="glyph">●</span>matches</span></td></tr><tr><td><code>ratelimit</code></td><td><code>F417</code></td><td><code>F417</code></td><td><span class="chip ok"><span class="glyph">●</span>matches</span></td></tr><tr><td><code>workflow</code></td><td><code>F417</code></td><td><code>F417</code></td><td><span class="chip ok"><span class="glyph">●</span>matches</span></td></tr></tbody></table></div><div class="callout"><span class="cls intent">intent</span> <b>break-glass</b> <a class="fact" href="#f073">f073</a> · Mon Aug 24 23:40 · user:maya · INC-2311<br><em>ECS force-deploy previous task definition</em> on <code>service:api</code>, F417 → F416; expires until the next promotion to production.<br><span class="muted">5xx spike on /api/stacks after #46133 (rate-limit key collision). Rolled api back to the F416 task definition via the ECS console; console/jobs/ratelimit/workflow left at F417.</span></div><p class="small">The drift is <b>explained</b>: the side door wrote the same class of fact, with the same attribution, as a front-door promotion. Automation can respect it instead of undoing it, and the adopt-vs-revert question is decidable — here the fix ships forward in F418.</p><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_observed AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, &#x27;$.services&#x27;)        AS services,
+       json_extract(f.payload, &#x27;$.source&#x27;)          AS source,
+       f.ts, f.id                                   AS fact,
+       (SELECT count(*) FROM json_each(json_extract(f.payload, &#x27;$.services&#x27;)) je
+         WHERE je.value &lt;&gt; (SELECT d.freight FROM v_desired d WHERE d.stage = substr(f.subject, 7)))
+                                                    AS mismatches,
+       (SELECT group_concat(je.key || &#x27;@&#x27; || je.value, &#x27;, &#x27;)
+          FROM json_each(json_extract(f.payload, &#x27;$.services&#x27;)) je
+         WHERE je.value &lt;&gt; (SELECT d.freight FROM v_desired d WHERE d.stage = substr(f.subject, 7)))
+                                                    AS mismatch_detail
+FROM facts f
+WHERE f.kind = &#x27;state.observed&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;state.observed&#x27; AND g.subject = f.subject);
+
+CREATE VIEW v_breakglass AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, &#x27;$.scope&#x27;)           AS scope,
+       json_extract(f.payload, &#x27;$.action&#x27;)          AS action,
+       json_extract(f.payload, &#x27;$.from_freight&#x27;)    AS from_freight,
+       json_extract(f.payload, &#x27;$.to_freight&#x27;)      AS to_freight,
+       json_extract(f.payload, &#x27;$.incident&#x27;)        AS incident,
+       json_extract(f.payload, &#x27;$.expiry&#x27;)          AS expiry,
+       f.actor, f.ts, f.rationale, f.id             AS fact
+FROM facts f
+WHERE f.kind = &#x27;breakglass.recorded&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;breakglass.recorded&#x27; AND g.subject = f.subject);</pre></details></section><section id="releases"><div class="eyebrow">Keith parity</div><h2>Release trains</h2><p class="blurb">The past-releases cards: cut, staged, approved by whom, live where. One query over lanes and approvals.</p><div class="scroll"><table class=""><thead><tr><th>release</th><th>cut</th><th>staging</th><th>approved</th><th>production</th><th>production-eu</th></tr></thead><tbody><tr><td><b>F418</b><div class="small muted">PR #14882 · release/staging@08262026-0900 · a1b2c3d · 3 PRs</div></td><td>Wed Aug 26 09:00</td><td>Wed Aug 26 09:17</td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td></tr><tr><td><b>F417</b><div class="small muted">PR #14876 · release/staging@08242026-0900 · 7c9e2b4 · 3 PRs</div></td><td>Mon Aug 24 09:00</td><td>Mon Aug 24 09:18</td><td>user:maya<div class="small muted">Mon Aug 24 10:05</div></td><td>Mon Aug 24 10:31</td><td>Mon Aug 24 11:19</td></tr><tr><td><b>F416</b><div class="small muted">PR #14870 · release/staging@08182026-0900 · 3d9f1a7 · 2 PRs</div></td><td>Tue Aug 18 09:00</td><td>Tue Aug 18 09:18</td><td>user:maya<div class="small muted">Tue Aug 18 10:10</div></td><td>Tue Aug 18 10:34</td><td>Tue Aug 18 11:05</td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_releases AS
+SELECT fr.freight, fr.release_pr, fr.release_branch, fr.cut_at, fr.sha,
+       json_array_length(fr.prs)                                          AS prs,
+       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = &#x27;staging&#x27;)       AS staging_at,
+       (SELECT a.actor FROM v_approval a WHERE a.stage = &#x27;production&#x27; AND a.freight = fr.freight)      AS approved_by,
+       (SELECT a.ts    FROM v_approval a WHERE a.stage = &#x27;production&#x27; AND a.freight = fr.freight)      AS approved_at,
+       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = &#x27;production&#x27;)    AS production_at,
+       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = &#x27;production-eu&#x27;) AS production_eu_at
+FROM v_freight fr
+WHERE fr.cut_at IS NOT NULL
+ORDER BY fr.cut_at DESC;</pre></details></section><section id="transitions"><div class="eyebrow">fact grain ≠ step grain</div><h2>Inside a transition</h2><p class="blurb">A transition is the enactment reified: one subject, many facts across one or more executions. Position lives in phase facts the grid can read (Monday's rollout ran both versions live for five minutes before cutover); resource steps land on the same subject when the executor emits them.</p><h3><code>transition:T417-prod</code> — F417 → production</h3><p class="small muted">Mon Aug 24 10:06 → Mon Aug 24 10:31 · 0 resource steps recorded · run gha:push-build/7803</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started · ecs-rolling (create before delete)</td><td><a class="fact" href="#f058">f058</a></td></tr><tr><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>provisioning</b> — new task definitions registered; new tasks starting alongside old</td><td><a class="fact" href="#f059">f059</a></td></tr><tr><td>Mon Aug 24 10:19</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>both-live</b> — old and new tasks serving; ALB health checks passing on new</td><td><a class="fact" href="#f060">f060</a></td></tr><tr><td>Mon Aug 24 10:24</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>cutover</b> — target groups shifted to new tasks</td><td><a class="fact" href="#f061">f061</a></td></tr><tr><td>Mon Aug 24 10:25</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>retiring</b> — draining old tasks</td><td><a class="fact" href="#f062">f062</a></td></tr><tr><td>Mon Aug 24 10:31</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>succeeded</b> · update #3184 · {&quot;create&quot;: 3, &quot;update&quot;: 11, &quot;delete&quot;: 0, &quot;replace&quot;: 0}</td><td><a class="fact" href="#f063">f063</a></td></tr></tbody></table></div><h3><code>transition:T418-staging</code> — F418 → staging</h3><p class="small muted">Wed Aug 26 09:01 → Wed Aug 26 09:17 · 3 resource steps recorded · run gha:pr-build/7841</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Wed Aug 26 09:01</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started · </td><td><a class="fact" href="#f087">f087</a></td></tr><tr><td>Wed Aug 26 09:05</td><td><span class="cls observation">observation</span></td><td><code>resource.step</code></td><td>create <code>aws:ecs/taskDefinition:TaskDefinition</code><div class="small muted">urn:pulumi:staging::pulumi-service::aws:ecs/taskDefinition:TaskDefinition::api</div></td><td><a class="fact" href="#f088">f088</a></td></tr><tr><td>Wed Aug 26 09:06</td><td><span class="cls observation">observation</span></td><td><code>resource.step</code></td><td>update <code>aws:ecs/service:Service</code><div class="small muted">urn:pulumi:staging::pulumi-service::aws:ecs/service:Service::api</div></td><td><a class="fact" href="#f089">f089</a></td></tr><tr><td>Wed Aug 26 09:12</td><td><span class="cls observation">observation</span></td><td><code>resource.step</code></td><td>update <code>aws:ecs/service:Service</code><div class="small muted">urn:pulumi:staging::pulumi-service::aws:ecs/service:Service::console</div></td><td><a class="fact" href="#f090">f090</a></td></tr><tr><td>Wed Aug 26 09:17</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>succeeded</b> · update #1421 · {&quot;create&quot;: 5, &quot;update&quot;: 12, &quot;delete&quot;: 0, &quot;replace&quot;: 0}</td><td><a class="fact" href="#f091">f091</a></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_transition AS
+SELECT s.subject                                    AS transition,
+       json_extract(s.payload, &#x27;$.stage&#x27;)           AS stage,
+       json_extract(s.payload, &#x27;$.freight&#x27;)         AS freight,
+       json_extract(s.payload, &#x27;$.stack&#x27;)           AS stack,
+       json_extract(s.payload, &#x27;$.record_version&#x27;)  AS record_version,
+       json_extract(s.payload, &#x27;$.run&#x27;)             AS run,
+       json_extract(s.payload, &#x27;$.strategy&#x27;)        AS strategy,
+       s.ts                                         AS started_at,
+       e.ts                                         AS finished_at,
+       json_extract(e.payload, &#x27;$.outcome&#x27;)         AS outcome,
+       json_extract(e.payload, &#x27;$.ops_update&#x27;)      AS ops_update,
+       json_extract(e.payload, &#x27;$.summary&#x27;)         AS summary,
+       (SELECT json_extract(p.payload, &#x27;$.phase&#x27;) FROM facts p
+         WHERE p.kind = &#x27;transition.phase&#x27; AND p.subject = s.subject
+         ORDER BY p.ts DESC LIMIT 1)                AS last_phase,
+       (SELECT count(*) FROM facts r
+         WHERE r.kind = &#x27;resource.step&#x27; AND r.subject = s.subject) AS resource_steps,
+       s.id                                         AS started_fact,
+       e.id                                         AS finished_fact
+FROM facts s
+LEFT JOIN facts e ON e.kind = &#x27;transition.finished&#x27; AND e.subject = s.subject
+WHERE s.kind = &#x27;transition.started&#x27;;</pre></details></section><section id="ledger"><div class="eyebrow">the record is the interface</div><h2>The ledger</h2><p class="blurb"></p><p class="lede">107 facts at this instant; the newest 14 below. Two classes, append-only, every row attributed. Every screen above is a SELECT over this.</p><div class="scroll"><table class="ledger"><thead><tr><th>id</th><th>when</th><th>class</th><th>kind</th><th>subject</th><th>actor</th><th>payload · rationale</th></tr></thead><tbody><tr><td><span id="f107"></span><code>f107</code></td><td>Wed Aug 26 11:30</td><td><span class="cls observation">observation</span></td><td><code>state.observed</code></td><td><code>stage:production-eu</code></td><td>watch:ecs</td><td><div class="payload">{&quot;stack&quot;: &quot;service&quot;, &quot;services&quot;: {&quot;api&quot;: &quot;F417&quot;, &quot;console&quot;: &quot;F417&quot;, &quot;jobs&quot;: &quot;F417&quot;, &quot;ratelimit&quot;: &quot;F417&quot;, &quot;workflow&quot;: &quot;F417&quot;}, &quot;source&quot;: &quot;ecs describe-services, task-definition SHA tags&quot;}</div></td></tr><tr><td><span id="f106"></span><code>f106</code></td><td>Wed Aug 26 11:30</td><td><span class="cls observation">observation</span></td><td><code>state.observed</code></td><td><code>stage:production</code></td><td>watch:ecs</td><td><div class="payload">{&quot;stack&quot;: &quot;service&quot;, &quot;services&quot;: {&quot;api&quot;: &quot;F416&quot;, &quot;console&quot;: &quot;F417&quot;, &quot;jobs&quot;: &quot;F417&quot;, &quot;ratelimit&quot;: &quot;F417&quot;, &quot;workflow&quot;: &quot;F417&quot;}, &quot;source&quot;: &quot;ecs describe-services, task-definition SHA tags&quot;}</div></td></tr><tr><td><span id="f105"></span><code>f105</code></td><td>Wed Aug 26 10:44</td><td><span class="cls observation">observation</span></td><td><code>verification.recorded</code></td><td><code>stage:testing</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F419&quot;, &quot;check&quot;: &quot;integration-tests&quot;, &quot;outcome&quot;: &quot;pass&quot;, &quot;detail&quot;: &quot;412 tests, 0 failures&quot;, &quot;run&quot;: &quot;gha:push-master/7846&quot;}</div></td></tr><tr><td><span id="f104"></span><code>f104</code></td><td>Wed Aug 26 10:31</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td><code>transition:T419-testing</code></td><td>ci:gha</td><td><div class="payload">{&quot;outcome&quot;: &quot;succeeded&quot;, &quot;ops_update&quot;: 6231, &quot;summary&quot;: {&quot;create&quot;: 0, &quot;update&quot;: 1, &quot;delete&quot;: 0, &quot;replace&quot;: 0}}</div></td></tr><tr><td><span id="f103"></span><code>f103</code></td><td>Wed Aug 26 10:28</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td><code>transition:T419-testing-eu</code></td><td>ci:gha</td><td><div class="payload">{&quot;outcome&quot;: &quot;succeeded&quot;, &quot;ops_update&quot;: 5134, &quot;summary&quot;: {&quot;create&quot;: 0, &quot;update&quot;: 1, &quot;delete&quot;: 0, &quot;replace&quot;: 0}}</div></td></tr><tr><td><span id="f102"></span><code>f102</code></td><td>Wed Aug 26 10:03</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td><code>transition:T419-testing-eu</code></td><td>ci:gha</td><td><div class="payload">{&quot;stage&quot;: &quot;testing-eu&quot;, &quot;freight&quot;: &quot;F419&quot;, &quot;stack&quot;: &quot;service&quot;, &quot;run&quot;: &quot;gha:push-master/7846&quot;}</div></td></tr><tr><td><span id="f101"></span><code>f101</code></td><td>Wed Aug 26 10:03</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td><code>transition:T419-testing</code></td><td>ci:gha</td><td><div class="payload">{&quot;stage&quot;: &quot;testing&quot;, &quot;freight&quot;: &quot;F419&quot;, &quot;stack&quot;: &quot;service&quot;, &quot;run&quot;: &quot;gha:push-master/7846&quot;}</div></td></tr><tr><td><span id="f100"></span><code>f100</code></td><td>Wed Aug 26 10:03</td><td><span class="cls intent">intent</span></td><td><code>promotion.decided</code></td><td><code>stage:testing-eu</code></td><td>policy:testing-eu</td><td><div class="payload">{&quot;freight&quot;: &quot;F419&quot;}</div><div class="small"><em>auto: master build discovered</em></div></td></tr><tr><td><span id="f099"></span><code>f099</code></td><td>Wed Aug 26 10:03</td><td><span class="cls intent">intent</span></td><td><code>promotion.decided</code></td><td><code>stage:testing</code></td><td>policy:testing</td><td><div class="payload">{&quot;freight&quot;: &quot;F419&quot;}</div><div class="small"><em>auto: master build discovered</em></div></td></tr><tr><td><span id="f098"></span><code>f098</code></td><td>Wed Aug 26 10:02</td><td><span class="cls observation">observation</span></td><td><code>freight.discovered</code></td><td><code>freight:F419</code></td><td>ci:gha</td><td><div class="payload">{&quot;source&quot;: {&quot;repo&quot;: &quot;pulumi/pulumi-service&quot;, &quot;sha&quot;: &quot;e5f6a7b&quot;, &quot;branch&quot;: &quot;master&quot;}, &quot;images&quot;: {&quot;api&quot;: &quot;sha256:8a7b6c&quot;, &quot;console&quot;: &quot;sha256:4c1d90&quot;, &quot;jobs&quot;: &quot;sha256:71ac05&quot;, &quot;ratelimit&quot;: &quot;sha256:33e4d1&quot;, &quot;workflow&quot;: &quot;sha256:d4e5f6&quot;}, &quot;config&quot;: {&quot;service&quot;: &quot;v42&quot;}, &quot;prs&quot;: [{&quot;number&quot;: 46181, &quot;title&quot;: &quot;Console: fix stack list pagination&quot;, &quot;author&quot;: &quot;jonas&quot;}], &quot;build&quot;: &quot;gha:push-master/7846&quot;}</div></td></tr><tr><td><span id="f097"></span><code>f097</code></td><td>Wed Aug 26 09:40</td><td><span class="cls observation">observation</span></td><td><code>plan.summarized</code></td><td><code>stage:production-eu</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F418&quot;, &quot;against&quot;: &quot;F417&quot;, &quot;create&quot;: 2, &quot;update&quot;: 14, &quot;delete&quot;: 0, &quot;replace&quot;: 0, &quot;migrations_changed&quot;: true, &quot;migrations&quot;: [&quot;20260825_stack_tags_index.sql&quot;], &quot;run&quot;: &quot;gha:pr-build/7841&quot;, &quot;note&quot;: &quot;computed ahead of candidacy: the gate is evaluable at rest&quot;}</div></td></tr><tr><td><span id="f096"></span><code>f096</code></td><td>Wed Aug 26 09:36</td><td><span class="cls observation">observation</span></td><td><code>plan.summarized</code></td><td><code>stage:production</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F418&quot;, &quot;against&quot;: &quot;world@2026-08-26T09:36Z (api at F416 task def, rest at F417)&quot;, &quot;create&quot;: 2, &quot;update&quot;: 14, &quot;delete&quot;: 0, &quot;replace&quot;: 0, &quot;migrations_changed&quot;: true, &quot;migrations&quot;: [&quot;20260825_stack_tags_index.sql&quot;], &quot;run&quot;: &quot;gha:pr-build/7841&quot;}</div></td></tr><tr><td><span id="f095"></span><code>f095</code></td><td>Wed Aug 26 09:35</td><td><span class="cls observation">observation</span></td><td><code>verification.recorded</code></td><td><code>stage:staging</code></td><td>watch:load-generator</td><td><div class="payload">{&quot;freight&quot;: &quot;F418&quot;, &quot;check&quot;: &quot;load-generator&quot;, &quot;outcome&quot;: &quot;pass&quot;, &quot;detail&quot;: &quot;100% success over 10m&quot;}</div></td></tr><tr><td><span id="f094"></span><code>f094</code></td><td>Wed Aug 26 09:31</td><td><span class="cls observation">observation</span></td><td><code>verification.recorded</code></td><td><code>stage:staging</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F418&quot;, &quot;check&quot;: &quot;smoke&quot;, &quot;outcome&quot;: &quot;pass&quot;, &quot;detail&quot;: &quot;deploy-smoke-test green&quot;, &quot;run&quot;: &quot;gha:deploy-smoke-test/2244&quot;}</div></td></tr></tbody></table></div><details class="sql"><summary>the table</summary><pre>-- The ledger: one append-only table, two fact classes, every row attributed.
+--
+-- Everything else in this repo is a query over this table. If a view ever
+-- needs a second mutable table to render, that is a design smell — record it
+-- in smells.md rather than adding the table.
+
+CREATE TABLE facts (
+  seq       INTEGER PRIMARY KEY,           -- arrival order; the ledger is append-only
+  id        TEXT    NOT NULL UNIQUE,       -- stable handle so facts can cite facts
+  ts        TEXT    NOT NULL,              -- ISO-8601 UTC
+  class     TEXT    NOT NULL CHECK (class IN (&#x27;intent&#x27;, &#x27;observation&#x27;)),
+  kind      TEXT    NOT NULL,              -- e.g. promotion.decided, transition.finished
+  subject   TEXT    NOT NULL,              -- &#x27;&lt;type&gt;:&lt;name&gt;&#x27; — stage:, freight:, transition:, edge:, record:
+  actor     TEXT    NOT NULL,              -- who/what wrote it: user:, policy:, cron:, ci:, watch:
+  payload   TEXT    NOT NULL DEFAULT &#x27;{}&#x27; CHECK (json_valid(payload)),
+  rationale TEXT,                          -- why (intent facts)
+  refs      TEXT    NOT NULL DEFAULT &#x27;[]&#x27; CHECK (json_valid(refs))  -- fact ids this one answers to
+);
+
+CREATE INDEX facts_subject ON facts (subject, ts);
+CREATE INDEX facts_kind    ON facts (kind, ts);
+
+-- The only non-ledger state: what time it is. Views that ask &quot;active now?&quot;
+-- (holds) read it. The renderer sets it so the fixture renders the same at any
+-- wall-clock time.
+CREATE TABLE clock (now TEXT NOT NULL);
+</pre></details></section></div><div class="snapshot" data-asof="2026-08-24T10:20:00Z" hidden><section id="grid"><div class="eyebrow">1 · the subject grid</div><h2>What is where, since when, waiting on whom</h2><p class="blurb">One row per stage. <em>Should carry</em> is the latest promotion decision; <em>carries</em> is the latest enactment that finished; the state column is a join of the two with the gate evaluation, the active holds, and the last conformance read. Nothing in the state column is stored.</p><div class="scroll"><table class="grid"><thead><tr><th>stage</th><th>state (derived)</th><th>should carry (intent)</th><th>carries (observed)</th></tr></thead><tbody><tr><td><b>testing</b><div class="muted small">us-west-2 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F417</code><div class="muted small">Fri Aug 21 21:41 · policy:testing</div></td><td><code>F417</code><div class="muted small">since Fri Aug 21 22:05 · 2d 12h · update #6210</div></td></tr><tr><td><b>testing-eu</b><div class="muted small">eu-central-1 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F417</code><div class="muted small">Fri Aug 21 21:41 · policy:testing-eu</div></td><td><code>F417</code><div class="muted small">since Fri Aug 21 22:03 · 2d 12h · update #5120</div></td></tr><tr><td><b>staging</b><div class="muted small">us-west-2 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F417</code><div class="muted small">Mon Aug 24 09:01 · policy:staging</div></td><td><code>F417</code><div class="muted small">since Mon Aug 24 09:18 · 1h 02m · update #1415</div></td></tr><tr><td><b>production</b><div class="muted small">us-west-2 · internal-tools</div></td><td><span class="chip live"><span class="glyph">◌</span>in-flight</span><div class="small"><code>transition:T417-prod</code> · phase <b>both-live</b></div></td><td><code>F417</code><div class="muted small">Mon Aug 24 10:05 · policy:production</div></td><td><code>F416</code><div class="muted small">since Tue Aug 18 10:34 · 5d 23h · update #3171</div></td></tr><tr><td><b>production-eu</b><div class="muted small">eu-central-1 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F416</code><div class="muted small">Tue Aug 18 10:47 · policy:production-eu</div></td><td><code>F416</code><div class="muted small">since Tue Aug 18 11:05 · 5d 23h · update #2064</div></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_grid AS
+SELECT s.ord, s.stage, s.region, s.owner, s.url, s.ops,
+       d.freight        AS desired,
+       d.decided_at,
+       d.decided_by,
+       k.freight        AS carried,
+       k.since          AS carried_since,
+       k.ops_update,
+       i.transition     AS inflight,
+       i.last_phase,
+       ge.freight       AS candidate,
+       ge.awaiting,
+       ge.awaiting_since,
+       ge.held_until,
+       CASE
+         WHEN i.transition IS NOT NULL                             THEN &#x27;in-flight&#x27;
+         WHEN lf.outcome = &#x27;failed&#x27; AND d.freight &lt;&gt; k.freight     THEN &#x27;failed&#x27;
+         WHEN ge.freight IS NOT NULL AND ge.freight &lt;&gt; d.freight
+              AND ge.held_until IS NOT NULL                        THEN &#x27;held&#x27;
+         WHEN ge.freight IS NOT NULL AND ge.freight &lt;&gt; d.freight
+              AND ge.passes = 0                                    THEN &#x27;awaiting&#x27;
+         WHEN ge.freight IS NOT NULL AND ge.freight &lt;&gt; d.freight
+              AND ge.passes = 1                                    THEN &#x27;ready&#x27;
+         WHEN d.freight = k.freight                                THEN &#x27;converged&#x27;
+         ELSE &#x27;pending&#x27;
+       END AS status,
+       CASE WHEN o.mismatches &gt; 0 THEN
+         o.mismatch_detail ||
+         CASE WHEN bg.fact IS NOT NULL
+              THEN &#x27; — break-glass &#x27; || bg.incident || &#x27; (&#x27; || bg.fact || &#x27;)&#x27;
+              ELSE &#x27; — UNEXPLAINED&#x27; END
+       END AS drift,
+       o.ts AS observed_at,
+       h.until_ts AS hold_until, h.actor AS hold_by, h.rationale AS hold_rationale
+FROM v_stage s
+LEFT JOIN v_desired       d  ON d.stage  = s.stage
+LEFT JOIN v_carried       k  ON k.stage  = s.stage
+LEFT JOIN v_inflight      i  ON i.stage  = s.stage AND i.stack = &#x27;service&#x27;
+LEFT JOIN v_last_finished lf ON lf.stage = s.stage
+LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
+LEFT JOIN v_observed      o  ON o.stage  = s.stage
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_hold          h  ON h.stage  = s.stage
+ORDER BY s.ord;
+
+CREATE VIEW v_gate_eval AS
+SELECT g.*, c.available_at,
+  CASE g.stage
+    WHEN &#x27;testing&#x27;       THEN 1
+    WHEN &#x27;testing-eu&#x27;    THEN 1
+    WHEN &#x27;staging&#x27;       THEN (g.upstream_integration_at IS NOT NULL)
+    WHEN &#x27;production&#x27;    THEN (g.upstream_integration_at IS NOT NULL
+                               AND g.staging_smoke_at IS NOT NULL
+                               AND g.staging_loadgen_at IS NOT NULL
+                               AND g.approved_at IS NOT NULL)
+    WHEN &#x27;production-eu&#x27; THEN (g.upstream_carried_at IS NOT NULL
+                               AND g.upstream_integration_at IS NOT NULL
+                               AND g.held_until IS NULL
+                               AND (g.plan_safe = 1 OR g.approved_at IS NOT NULL))
+  END AS passes,
+  CASE g.stage
+    WHEN &#x27;staging&#x27; THEN
+      CASE WHEN g.upstream_integration_at IS NULL THEN &#x27;verification: integration-tests in testing&#x27; END
+    WHEN &#x27;production&#x27; THEN
+      CASE WHEN g.upstream_integration_at IS NULL THEN &#x27;verification: integration-tests in staging&#x27;
+           WHEN g.staging_smoke_at IS NULL        THEN &#x27;verification: smoke in staging&#x27;
+           WHEN g.staging_loadgen_at IS NULL      THEN &#x27;verification: load-generator in staging&#x27;
+           WHEN g.approved_at IS NULL             THEN &#x27;approval: oncall (merge release PR)&#x27; END
+    WHEN &#x27;production-eu&#x27; THEN
+      CASE WHEN g.upstream_carried_at IS NULL     THEN &#x27;production to carry &#x27; || g.freight
+           WHEN g.upstream_integration_at IS NULL THEN &#x27;verification: integration-tests in production&#x27;
+           WHEN g.held_until IS NOT NULL          THEN &#x27;hold until &#x27; || g.held_until
+           WHEN g.plan_safe IS NULL               THEN &#x27;plan for production-eu&#x27;
+           WHEN g.plan_safe = 0 AND g.approved_at IS NULL
+                                                  THEN &#x27;approval: oncall (plan not safe: migrations or destructive steps)&#x27; END
+  END AS awaiting,
+  max(coalesce(c.available_at, &#x27;&#x27;),
+      coalesce(g.upstream_integration_at, &#x27;&#x27;),
+      coalesce(g.staging_smoke_at, &#x27;&#x27;),
+      coalesce(g.staging_loadgen_at, &#x27;&#x27;),
+      coalesce(g.upstream_carried_at, &#x27;&#x27;)) AS awaiting_since
+FROM v_gate_all g
+JOIN v_candidate c ON c.stage = g.stage AND c.freight = g.freight;
+
+CREATE VIEW v_candidate AS
+SELECT s.stage,
+  CASE
+    WHEN s.upstream = &#x27;warehouse:master&#x27; THEN
+      (SELECT fr.freight FROM v_freight fr WHERE fr.branch = &#x27;master&#x27; ORDER BY fr.discovered_at DESC LIMIT 1)
+    WHEN s.upstream = &#x27;release-train&#x27; THEN
+      (SELECT fr.freight FROM v_freight fr WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC LIMIT 1)
+    ELSE
+      (SELECT k.freight FROM v_carried k WHERE k.stage = s.upstream)
+  END AS freight,
+  CASE
+    WHEN s.upstream = &#x27;warehouse:master&#x27; THEN
+      (SELECT fr.discovered_at FROM v_freight fr WHERE fr.branch = &#x27;master&#x27; ORDER BY fr.discovered_at DESC LIMIT 1)
+    WHEN s.upstream = &#x27;release-train&#x27; THEN
+      (SELECT fr.cut_at FROM v_freight fr WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC LIMIT 1)
+    ELSE
+      (SELECT k.since FROM v_carried k WHERE k.stage = s.upstream)
+  END AS available_at
+FROM v_stage s;</pre></details></section><section id="lanes"><div class="eyebrow">1 · freight lanes</div><h2>Freight × stage</h2><p class="blurb">Each freight runs vertically through the stages it has reached. A cell is the time the enactment finished there, or what the freight is waiting on to get there. The same content-keyed freight moves through every stage — the testing build <em>is</em> the release.</p><div class="scroll"><table class="lanes"><thead><tr><th>freight</th><th>testing</th><th>testing-eu</th><th>staging</th><th>production</th><th>production-eu</th></tr></thead><tbody><tr><td><b>F417</b><div class="muted small">release PR #14876 · cut Mon Aug 24 09:00</div></td><td><span class="reached">Fri Aug 21 22:05</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="reached">Fri Aug 21 22:03</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="reached">Mon Aug 24 09:18</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="chip live"><span class="glyph">◌</span>in flight</span><div class="small muted">since Mon Aug 24 10:06</div></td><td><span class="muted">—</span></td></tr><tr><td><b>F416</b><div class="muted small">release PR #14870 · cut Tue Aug 18 09:00</div></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="reached">Tue Aug 18 09:18</span></td><td><span class="reached">Tue Aug 18 10:34</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="reached">Tue Aug 18 11:05</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_lanes AS
+SELECT fr.freight, fr.release_pr, fr.cut_at, fr.discovered_at, s.stage, s.ord,
+  (SELECT min(t.finished_at) FROM v_transition t
+    WHERE t.stage = s.stage AND t.freight = fr.freight
+      AND t.stack = &#x27;service&#x27; AND t.outcome = &#x27;succeeded&#x27;)       AS reached_at,
+  (SELECT t.started_at FROM v_transition t
+    WHERE t.stage = s.stage AND t.freight = fr.freight
+      AND t.stack = &#x27;service&#x27; AND t.finished_at IS NULL)         AS inflight_since,
+  CASE WHEN ge.freight = fr.freight AND ge.passes = 0
+        AND (d.freight IS NULL OR d.freight &lt;&gt; fr.freight)
+       THEN ge.awaiting END                                      AS awaiting,
+  CASE WHEN ge.freight = fr.freight AND ge.passes = 0
+        AND (d.freight IS NULL OR d.freight &lt;&gt; fr.freight)
+       THEN ge.awaiting_since END                                AS awaiting_since,
+  (k.freight = fr.freight)                                       AS is_current
+FROM v_freight fr
+CROSS JOIN v_stage s
+LEFT JOIN v_gate_eval ge ON ge.stage = s.stage
+LEFT JOIN v_desired   d  ON d.stage  = s.stage
+LEFT JOIN v_carried   k  ON k.stage  = s.stage;</pre></details></section><section id="awaiting"><div class="eyebrow">2 · awaiting ≠ failure</div><h2>Production is waiting, not broken</h2><p class="blurb">The gate is a query joining both fact classes, evaluated at rest. What it lacks is an approval fact; until one arrives the stage is <em>awaiting</em>, rendered as an honest open item with a duration — not as a failed run. Suspending holds no compute: there is no runner parked on this.</p><p class="lede">Candidate <code>F417</code> for <b>production</b> (policy: gated). Gate <code>verified(staging, F, &#x27;integration-tests&#x27;) AND verified(staging, F, &#x27;smoke&#x27;) AND verified(staging, F, &#x27;load-generator&#x27;) AND approved(production, F, role = &#x27;oncall&#x27;)</code> passes.</p><div class="scroll"><table class=""><thead><tr><th></th><th>requirement</th><th>satisfied at</th><th>evidence</th></tr></thead><tbody><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>verified in staging: integration-tests</td><td>Mon Aug 24 09:30</td><td>412 tests, 0 failures <a class="fact" href="#f052">f052</a></td></tr><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>verified in staging: smoke</td><td>Mon Aug 24 09:32</td><td>deploy-smoke-test green <a class="fact" href="#f053">f053</a></td></tr><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>verified in staging: load-generator</td><td>Mon Aug 24 09:38</td><td>100% success over 10m <a class="fact" href="#f054">f054</a></td></tr><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>approved by oncall (merge of the release PR)</td><td>Mon Aug 24 10:05</td><td>user:maya <a class="fact" href="#f056">f056</a></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_gate_all AS
+SELECT s.stage, fr.freight, p.mode, p.rule,
+  (SELECT v.ts FROM v_verified v
+    WHERE v.stage = s.verify_in AND v.freight = fr.freight
+      AND v.chk = &#x27;integration-tests&#x27; AND v.outcome = &#x27;pass&#x27;)  AS upstream_integration_at,
+  (SELECT v.ts FROM v_verified v
+    WHERE v.stage = &#x27;staging&#x27; AND v.freight = fr.freight
+      AND v.chk = &#x27;smoke&#x27; AND v.outcome = &#x27;pass&#x27;)              AS staging_smoke_at,
+  (SELECT v.ts FROM v_verified v
+    WHERE v.stage = &#x27;staging&#x27; AND v.freight = fr.freight
+      AND v.chk = &#x27;load-generator&#x27; AND v.outcome = &#x27;pass&#x27;)     AS staging_loadgen_at,
+  (SELECT k.since FROM v_carried k
+    WHERE k.stage = s.upstream AND k.freight = fr.freight)      AS upstream_carried_at,
+  (SELECT a.ts FROM v_approval a
+    WHERE a.stage = s.stage AND a.freight = fr.freight)         AS approved_at,
+  (SELECT a.actor FROM v_approval a
+    WHERE a.stage = s.stage AND a.freight = fr.freight)         AS approved_by,
+  (SELECT a.fact FROM v_approval a
+    WHERE a.stage = s.stage AND a.freight = fr.freight)         AS approval_fact,
+  (SELECT pl.safe FROM v_plan pl
+    WHERE pl.stage = s.stage AND pl.freight = fr.freight)       AS plan_safe,
+  (SELECT pl.migrations_changed FROM v_plan pl
+    WHERE pl.stage = s.stage AND pl.freight = fr.freight)       AS migrations_changed,
+  (SELECT pl.fact FROM v_plan pl
+    WHERE pl.stage = s.stage AND pl.freight = fr.freight)       AS plan_fact,
+  (SELECT h.until_ts FROM v_hold h WHERE h.stage = s.stage)     AS held_until,
+  (SELECT h.fact FROM v_hold h WHERE h.stage = s.stage)         AS hold_fact
+FROM v_stage s
+CROSS JOIN v_freight fr
+JOIN v_policy p ON p.stage = s.stage;</pre></details></section><section id="trace"><div class="eyebrow">3 · where is my change</div><h2>PR → freight → stages</h2><p class="blurb">Keith's tracker reconstructs this by mining CI logs and commit subjects. Here it is a join: the freight names its PRs, the lanes say where the freight is. A PR merged after the cut is not <em>unreleased</em> — it is in testing, with a timestamp, because testing is a stage.</p><div class="scroll"><table class="trace"><thead><tr><th>change</th><th>where is it</th><th>testing</th><th>testing-eu</th><th>staging</th><th>production</th><th>production-eu</th></tr></thead><tbody><tr><td><b>#46140</b> Bump workflow image to 2026.08.21<div class="muted small">priya · F417 · release PR #14876</div></td><td>in <b>staging</b> since Mon Aug 24 09:18</td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td></tr><tr><td><b>#46133</b> Tighten rate limits on /api/stacks<div class="muted small">amina · F417 · release PR #14876</div></td><td>in <b>staging</b> since Mon Aug 24 09:18</td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td></tr><tr><td><b>#46120</b> Migrate stack tags to new table<div class="muted small">jonas · F417 · release PR #14876</div></td><td>in <b>staging</b> since Mon Aug 24 09:18</td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td></tr><tr><td><b>#46101</b> Jobs: retry webhook deliveries with backoff<div class="muted small">jonas · F416 · release PR #14870</div></td><td>in <b>production-eu</b> since Tue Aug 18 11:05</td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="reached">Tue Aug 18 09:18</span></td><td><span class="reached">Tue Aug 18 10:34</span></td><td><span class="reached">Tue Aug 18 11:05</span></td></tr><tr><td><b>#46098</b> Console: new stack list empty state<div class="muted small">amina · F416 · release PR #14870</div></td><td>in <b>production-eu</b> since Tue Aug 18 11:05</td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="reached">Tue Aug 18 09:18</span></td><td><span class="reached">Tue Aug 18 10:34</span></td><td><span class="reached">Tue Aug 18 11:05</span></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_trace AS
+SELECT json_extract(pr.value, &#x27;$.number&#x27;) AS pr,
+       json_extract(pr.value, &#x27;$.title&#x27;)  AS title,
+       json_extract(pr.value, &#x27;$.author&#x27;) AS author,
+       fr.freight, fr.release_pr,
+       l.stage, l.ord, l.reached_at, l.inflight_since, l.awaiting, l.awaiting_since, l.is_current
+FROM v_freight fr, json_each(fr.prs) pr
+JOIN v_lanes l ON l.freight = fr.freight;
+
+CREATE VIEW v_trace_summary AS
+SELECT t.pr, t.title, t.author, t.freight, t.release_pr,
+  (SELECT t2.stage FROM v_trace t2 WHERE t2.pr = t.pr AND t2.reached_at IS NOT NULL
+     ORDER BY t2.ord DESC LIMIT 1)                               AS furthest_stage,
+  (SELECT t2.reached_at FROM v_trace t2 WHERE t2.pr = t.pr AND t2.reached_at IS NOT NULL
+     ORDER BY t2.ord DESC LIMIT 1)                               AS furthest_at,
+  (SELECT t2.stage || &#x27;: &#x27; || t2.awaiting || &#x27; (since &#x27; || t2.awaiting_since || &#x27;)&#x27;
+     FROM v_trace t2 WHERE t2.pr = t.pr AND t2.awaiting IS NOT NULL
+     ORDER BY t2.ord LIMIT 1)                                    AS next,
+  CASE WHEN t.release_pr IS NULL THEN &#x27;not in a release yet (next cut picks it up)&#x27; END AS note
+FROM v_trace t
+GROUP BY t.pr;</pre></details></section><section id="diffgate"><div class="eyebrow">4 · a diff-gate</div><h2>"If migrations changed, require approval; otherwise fast-track"</h2><p class="blurb">Joe's question, answered as a query: the plan is a fact (stage 3 of the key decomposition — desired × world at T), so a gate can read it. Three freights, same rule, three different outcomes. The rule is evaluable before the freight is even a candidate — the plan for F418 was computed ahead.</p><p class="lede">production-eu policy: <code>carried(production, F) AND verified(production, F, &#x27;integration-tests&#x27;) AND NOT held(production-eu) AND (plan(production-eu, F).safe OR approved(production-eu, F, role = &#x27;oncall&#x27;))</code><br>where <em>safe</em> = <code>plan.delete = 0 AND plan.replace = 0 AND NOT plan.migrations_changed</code></p><div class="scroll"><table class=""><thead><tr><th>freight</th><th>plan for production-eu</th><th>upstream</th><th>gate outcome</th></tr></thead><tbody><tr><td><code>F416</code></td><td>+1 ~9 −0 ±0 <a class="fact" href="#f027">f027</a><div class="small muted">against F415</div></td><td>production carried it Tue Aug 18 10:34</td><td><span class="chip ok"><span class="glyph">▸</span>auto</span><div class="small">safe plan — no approval needed</div></td></tr><tr><td><code>F417</code></td><td><span class="muted">no plan yet</span></td><td><span class="muted">production does not carry it yet</span></td><td><span class="muted">not evaluable — plan missing</span></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_plan AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, &#x27;$.freight&#x27;)         AS freight,
+       json_extract(f.payload, &#x27;$.against&#x27;)         AS against,
+       json_extract(f.payload, &#x27;$.create&#x27;)          AS n_create,
+       json_extract(f.payload, &#x27;$.update&#x27;)          AS n_update,
+       json_extract(f.payload, &#x27;$.delete&#x27;)          AS n_delete,
+       json_extract(f.payload, &#x27;$.replace&#x27;)         AS n_replace,
+       json_extract(f.payload, &#x27;$.migrations_changed&#x27;) AS migrations_changed,
+       json_extract(f.payload, &#x27;$.migrations&#x27;)      AS migrations,
+       (json_extract(f.payload, &#x27;$.delete&#x27;) = 0
+        AND json_extract(f.payload, &#x27;$.replace&#x27;) = 0
+        AND NOT json_extract(f.payload, &#x27;$.migrations_changed&#x27;)) AS safe,
+       f.ts, f.id                                   AS fact
+FROM facts f
+WHERE f.kind = &#x27;plan.summarized&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;plan.summarized&#x27; AND g.subject = f.subject
+                AND json_extract(g.payload, &#x27;$.freight&#x27;) = json_extract(f.payload, &#x27;$.freight&#x27;));</pre></details></section><section id="uptake"><div class="eyebrow">5 · a pending uptake</div><h2>Publication is evidence; uptake is intent</h2><p class="blurb">The AMI bake published a new record. The worker pool's binding declares a gated uptake, so the grid shows <em>available, gated</em> with a preview — instead of an instance refresh nobody decided on. Blast radius is <code>consumers WHERE pending</code>: one.</p><div class="scroll"><table class=""><thead><tr><th>consumer · binding</th><th>published (evidence)</th><th>taken up (intent)</th><th>state</th></tr></thead><tbody><tr><td><b>workflow-pool@production</b><div class="small muted">ami_id ← workflow-ami@production</div></td><td>v12 <code>ami-0a17c4d2e9b3f5a61</code><div class="small muted">published Wed Aug 19 08:00 <a class="fact" href="#f032">f032</a></div></td><td>v12<div class="small muted">Wed Aug 19 09:30 · user:priya</div></td><td><span class="chip ok"><span class="glyph">●</span>current at v12</span><div class="small muted">An instance refresh drains the hot pool. Approve the trigger; never auto-uptake.</div></td></tr><tr><td><b>workflow-pool@production-eu</b><div class="small muted">ami_id ← workflow-ami@production-eu</div></td><td>v9 <code>ami-0c58e1f7a2d4b9c03</code><div class="small muted">published Wed Aug 19 08:10 <a class="fact" href="#f033">f033</a></div></td><td>v9<div class="small muted">Wed Aug 19 10:05 · user:priya</div></td><td><span class="chip ok"><span class="glyph">●</span>current at v9</span><div class="small muted">Same as US: approve the trigger.</div></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_pending_uptake AS
+SELECT e.consumer, e.producer, e.key, e.uptake AS policy,
+       r.version                                              AS published_version,
+       r.ts                                                   AS published_at,
+       json_extract(r.payload, &#x27;$.values.&#x27; || e.key)          AS published_value,
+       r.fact                                                 AS published_fact,
+       u.version                                              AS consumed_version,
+       u.ts                                                   AS consumed_at,
+       u.actor                                                AS consumed_by,
+       (r.version &gt; coalesce(u.version, 0))                   AS pending,
+       &#x27;preview &#x27; || e.consumer || &#x27; with &#x27; || e.key || &#x27; = &#x27;
+         || json_extract(r.payload, &#x27;$.values.&#x27; || e.key)     AS preview,
+       e.description
+FROM v_edge e
+LEFT JOIN v_record  r ON r.producer = e.producer
+LEFT JOIN v_uptaken u ON u.edge = e.edge;
+
+CREATE VIEW v_record AS
+SELECT substr(f.subject, 8)                         AS producer,
+       json_extract(f.payload, &#x27;$.version&#x27;)         AS version,
+       f.payload                                    AS payload,
+       json_extract(f.payload, &#x27;$.produced_by&#x27;)     AS produced_by,
+       f.ts, f.id                                   AS fact
+FROM facts f
+WHERE f.kind = &#x27;output.published&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;output.published&#x27; AND g.subject = f.subject);
+
+CREATE VIEW v_uptaken AS
+SELECT f.subject                                    AS edge,
+       json_extract(f.payload, &#x27;$.record_version&#x27;)  AS version,
+       f.actor, f.ts, f.rationale, f.id             AS fact
+FROM facts f
+WHERE f.kind = &#x27;uptake.decided&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;uptake.decided&#x27; AND g.subject = f.subject);</pre></details></section><section id="oob"><div class="eyebrow">the side door</div><h2>Out-of-band reality</h2><p class="blurb"></p><p class="muted">no conformance reads yet.</p><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_observed AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, &#x27;$.services&#x27;)        AS services,
+       json_extract(f.payload, &#x27;$.source&#x27;)          AS source,
+       f.ts, f.id                                   AS fact,
+       (SELECT count(*) FROM json_each(json_extract(f.payload, &#x27;$.services&#x27;)) je
+         WHERE je.value &lt;&gt; (SELECT d.freight FROM v_desired d WHERE d.stage = substr(f.subject, 7)))
+                                                    AS mismatches,
+       (SELECT group_concat(je.key || &#x27;@&#x27; || je.value, &#x27;, &#x27;)
+          FROM json_each(json_extract(f.payload, &#x27;$.services&#x27;)) je
+         WHERE je.value &lt;&gt; (SELECT d.freight FROM v_desired d WHERE d.stage = substr(f.subject, 7)))
+                                                    AS mismatch_detail
+FROM facts f
+WHERE f.kind = &#x27;state.observed&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;state.observed&#x27; AND g.subject = f.subject);</pre></details></section><section id="releases"><div class="eyebrow">Keith parity</div><h2>Release trains</h2><p class="blurb">The past-releases cards: cut, staged, approved by whom, live where. One query over lanes and approvals.</p><div class="scroll"><table class=""><thead><tr><th>release</th><th>cut</th><th>staging</th><th>approved</th><th>production</th><th>production-eu</th></tr></thead><tbody><tr><td><b>F417</b><div class="small muted">PR #14876 · release/staging@08242026-0900 · 7c9e2b4 · 3 PRs</div></td><td>Mon Aug 24 09:00</td><td>Mon Aug 24 09:18</td><td>user:maya<div class="small muted">Mon Aug 24 10:05</div></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td></tr><tr><td><b>F416</b><div class="small muted">PR #14870 · release/staging@08182026-0900 · 3d9f1a7 · 2 PRs</div></td><td>Tue Aug 18 09:00</td><td>Tue Aug 18 09:18</td><td>user:maya<div class="small muted">Tue Aug 18 10:10</div></td><td>Tue Aug 18 10:34</td><td>Tue Aug 18 11:05</td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_releases AS
+SELECT fr.freight, fr.release_pr, fr.release_branch, fr.cut_at, fr.sha,
+       json_array_length(fr.prs)                                          AS prs,
+       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = &#x27;staging&#x27;)       AS staging_at,
+       (SELECT a.actor FROM v_approval a WHERE a.stage = &#x27;production&#x27; AND a.freight = fr.freight)      AS approved_by,
+       (SELECT a.ts    FROM v_approval a WHERE a.stage = &#x27;production&#x27; AND a.freight = fr.freight)      AS approved_at,
+       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = &#x27;production&#x27;)    AS production_at,
+       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = &#x27;production-eu&#x27;) AS production_eu_at
+FROM v_freight fr
+WHERE fr.cut_at IS NOT NULL
+ORDER BY fr.cut_at DESC;</pre></details></section><section id="transitions"><div class="eyebrow">fact grain ≠ step grain</div><h2>Inside a transition</h2><p class="blurb">A transition is the enactment reified: one subject, many facts across one or more executions. Position lives in phase facts the grid can read (Monday's rollout ran both versions live for five minutes before cutover); resource steps land on the same subject when the executor emits them.</p><h3><code>transition:T417-prod</code> — F417 → production</h3><p class="small muted">Mon Aug 24 10:06 → in flight · 0 resource steps recorded · run gha:push-build/7803</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started · ecs-rolling (create before delete)</td><td><a class="fact" href="#f058">f058</a></td></tr><tr><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>provisioning</b> — new task definitions registered; new tasks starting alongside old</td><td><a class="fact" href="#f059">f059</a></td></tr><tr><td>Mon Aug 24 10:19</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>both-live</b> — old and new tasks serving; ALB health checks passing on new</td><td><a class="fact" href="#f060">f060</a></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_transition AS
+SELECT s.subject                                    AS transition,
+       json_extract(s.payload, &#x27;$.stage&#x27;)           AS stage,
+       json_extract(s.payload, &#x27;$.freight&#x27;)         AS freight,
+       json_extract(s.payload, &#x27;$.stack&#x27;)           AS stack,
+       json_extract(s.payload, &#x27;$.record_version&#x27;)  AS record_version,
+       json_extract(s.payload, &#x27;$.run&#x27;)             AS run,
+       json_extract(s.payload, &#x27;$.strategy&#x27;)        AS strategy,
+       s.ts                                         AS started_at,
+       e.ts                                         AS finished_at,
+       json_extract(e.payload, &#x27;$.outcome&#x27;)         AS outcome,
+       json_extract(e.payload, &#x27;$.ops_update&#x27;)      AS ops_update,
+       json_extract(e.payload, &#x27;$.summary&#x27;)         AS summary,
+       (SELECT json_extract(p.payload, &#x27;$.phase&#x27;) FROM facts p
+         WHERE p.kind = &#x27;transition.phase&#x27; AND p.subject = s.subject
+         ORDER BY p.ts DESC LIMIT 1)                AS last_phase,
+       (SELECT count(*) FROM facts r
+         WHERE r.kind = &#x27;resource.step&#x27; AND r.subject = s.subject) AS resource_steps,
+       s.id                                         AS started_fact,
+       e.id                                         AS finished_fact
+FROM facts s
+LEFT JOIN facts e ON e.kind = &#x27;transition.finished&#x27; AND e.subject = s.subject
+WHERE s.kind = &#x27;transition.started&#x27;;</pre></details></section><section id="ledger"><div class="eyebrow">the record is the interface</div><h2>The ledger</h2><p class="blurb"></p><p class="lede">60 facts at this instant; the newest 14 below. Two classes, append-only, every row attributed. Every screen above is a SELECT over this.</p><div class="scroll"><table class="ledger"><thead><tr><th>id</th><th>when</th><th>class</th><th>kind</th><th>subject</th><th>actor</th><th>payload · rationale</th></tr></thead><tbody><tr><td><span id="f060"></span><code>f060</code></td><td>Mon Aug 24 10:19</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td><code>transition:T417-prod</code></td><td>ci:gha</td><td><div class="payload">{&quot;phase&quot;: &quot;both-live&quot;, &quot;detail&quot;: &quot;old and new tasks serving; ALB health checks passing on new&quot;}</div></td></tr><tr><td><span id="f059"></span><code>f059</code></td><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td><code>transition:T417-prod</code></td><td>ci:gha</td><td><div class="payload">{&quot;phase&quot;: &quot;provisioning&quot;, &quot;detail&quot;: &quot;new task definitions registered; new tasks starting alongside old&quot;}</div></td></tr><tr><td><span id="f058"></span><code>f058</code></td><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td><code>transition:T417-prod</code></td><td>ci:gha</td><td><div class="payload">{&quot;stage&quot;: &quot;production&quot;, &quot;freight&quot;: &quot;F417&quot;, &quot;stack&quot;: &quot;service&quot;, &quot;run&quot;: &quot;gha:push-build/7803&quot;, &quot;strategy&quot;: &quot;ecs-rolling (create before delete)&quot;}</div></td></tr><tr><td><span id="f057"></span><code>f057</code></td><td>Mon Aug 24 10:05</td><td><span class="cls intent">intent</span></td><td><code>promotion.decided</code></td><td><code>stage:production</code></td><td>policy:production</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;}</div><div class="small"><em>gate satisfied: verified in staging (integration, smoke, load-generator) and approved by oncall</em></div></td></tr><tr><td><span id="f056"></span><code>f056</code></td><td>Mon Aug 24 10:05</td><td><span class="cls intent">intent</span></td><td><code>approval.granted</code></td><td><code>stage:production</code></td><td>user:maya</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;role&quot;: &quot;oncall&quot;, &quot;via&quot;: &quot;merged release PR #14876&quot;}</div><div class="small"><em>staging clean; the stack-tags migration is additive (new table, no drops)</em></div></td></tr><tr><td><span id="f055"></span><code>f055</code></td><td>Mon Aug 24 09:40</td><td><span class="cls observation">observation</span></td><td><code>plan.summarized</code></td><td><code>stage:production</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;against&quot;: &quot;F416&quot;, &quot;create&quot;: 3, &quot;update&quot;: 11, &quot;delete&quot;: 0, &quot;replace&quot;: 0, &quot;migrations_changed&quot;: true, &quot;migrations&quot;: [&quot;20260821_stack_tags.sql&quot;], &quot;run&quot;: &quot;gha:pr-build/7801&quot;}</div></td></tr><tr><td><span id="f054"></span><code>f054</code></td><td>Mon Aug 24 09:38</td><td><span class="cls observation">observation</span></td><td><code>verification.recorded</code></td><td><code>stage:staging</code></td><td>watch:load-generator</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;check&quot;: &quot;load-generator&quot;, &quot;outcome&quot;: &quot;pass&quot;, &quot;detail&quot;: &quot;100% success over 10m&quot;}</div></td></tr><tr><td><span id="f053"></span><code>f053</code></td><td>Mon Aug 24 09:32</td><td><span class="cls observation">observation</span></td><td><code>verification.recorded</code></td><td><code>stage:staging</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;check&quot;: &quot;smoke&quot;, &quot;outcome&quot;: &quot;pass&quot;, &quot;detail&quot;: &quot;deploy-smoke-test green&quot;, &quot;run&quot;: &quot;gha:deploy-smoke-test/2231&quot;}</div></td></tr><tr><td><span id="f052"></span><code>f052</code></td><td>Mon Aug 24 09:30</td><td><span class="cls observation">observation</span></td><td><code>verification.recorded</code></td><td><code>stage:staging</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;check&quot;: &quot;integration-tests&quot;, &quot;outcome&quot;: &quot;pass&quot;, &quot;detail&quot;: &quot;412 tests, 0 failures&quot;, &quot;run&quot;: &quot;gha:pr-build/7801&quot;}</div></td></tr><tr><td><span id="f051"></span><code>f051</code></td><td>Mon Aug 24 09:18</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td><code>transition:T417-staging</code></td><td>ci:gha</td><td><div class="payload">{&quot;outcome&quot;: &quot;succeeded&quot;, &quot;ops_update&quot;: 1415, &quot;summary&quot;: {&quot;create&quot;: 3, &quot;update&quot;: 11, &quot;delete&quot;: 0, &quot;replace&quot;: 0}}</div></td></tr><tr><td><span id="f050"></span><code>f050</code></td><td>Mon Aug 24 09:01</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td><code>transition:T417-staging</code></td><td>ci:gha</td><td><div class="payload">{&quot;stage&quot;: &quot;staging&quot;, &quot;freight&quot;: &quot;F417&quot;, &quot;stack&quot;: &quot;service&quot;, &quot;run&quot;: &quot;gha:pr-build/7801&quot;}</div></td></tr><tr><td><span id="f049"></span><code>f049</code></td><td>Mon Aug 24 09:01</td><td><span class="cls intent">intent</span></td><td><code>promotion.decided</code></td><td><code>stage:staging</code></td><td>policy:staging</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;}</div><div class="small"><em>release PR #14876 opened; F417 verified in testing</em></div></td></tr><tr><td><span id="f048"></span><code>f048</code></td><td>Mon Aug 24 09:00</td><td><span class="cls intent">intent</span></td><td><code>release.cut</code></td><td><code>freight:F417</code></td><td>cron:release-09utc</td><td><div class="payload">{&quot;release_pr&quot;: 14876, &quot;branch&quot;: &quot;release/staging@08242026-0900&quot;, &quot;armed_by&quot;: &quot;user:priya&quot;}</div><div class="small"><em>weekday release cron</em></div></td></tr><tr><td><span id="f047"></span><code>f047</code></td><td>Fri Aug 21 22:17</td><td><span class="cls observation">observation</span></td><td><code>verification.recorded</code></td><td><code>stage:testing</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;check&quot;: &quot;integration-tests&quot;, &quot;outcome&quot;: &quot;pass&quot;, &quot;detail&quot;: &quot;412 tests, 0 failures&quot;, &quot;run&quot;: &quot;gha:push-master/7788&quot;}</div></td></tr></tbody></table></div><details class="sql"><summary>the table</summary><pre>-- The ledger: one append-only table, two fact classes, every row attributed.
+--
+-- Everything else in this repo is a query over this table. If a view ever
+-- needs a second mutable table to render, that is a design smell — record it
+-- in smells.md rather than adding the table.
+
+CREATE TABLE facts (
+  seq       INTEGER PRIMARY KEY,           -- arrival order; the ledger is append-only
+  id        TEXT    NOT NULL UNIQUE,       -- stable handle so facts can cite facts
+  ts        TEXT    NOT NULL,              -- ISO-8601 UTC
+  class     TEXT    NOT NULL CHECK (class IN (&#x27;intent&#x27;, &#x27;observation&#x27;)),
+  kind      TEXT    NOT NULL,              -- e.g. promotion.decided, transition.finished
+  subject   TEXT    NOT NULL,              -- &#x27;&lt;type&gt;:&lt;name&gt;&#x27; — stage:, freight:, transition:, edge:, record:
+  actor     TEXT    NOT NULL,              -- who/what wrote it: user:, policy:, cron:, ci:, watch:
+  payload   TEXT    NOT NULL DEFAULT &#x27;{}&#x27; CHECK (json_valid(payload)),
+  rationale TEXT,                          -- why (intent facts)
+  refs      TEXT    NOT NULL DEFAULT &#x27;[]&#x27; CHECK (json_valid(refs))  -- fact ids this one answers to
+);
+
+CREATE INDEX facts_subject ON facts (subject, ts);
+CREATE INDEX facts_kind    ON facts (kind, ts);
+
+-- The only non-ledger state: what time it is. Views that ask &quot;active now?&quot;
+-- (holds) read it. The renderer sets it so the fixture renders the same at any
+-- wall-clock time.
+CREATE TABLE clock (now TEXT NOT NULL);
+</pre></details></section></div><div class="snapshot" data-asof="2026-08-24T10:50:00Z" hidden><section id="grid"><div class="eyebrow">1 · the subject grid</div><h2>What is where, since when, waiting on whom</h2><p class="blurb">One row per stage. <em>Should carry</em> is the latest promotion decision; <em>carries</em> is the latest enactment that finished; the state column is a join of the two with the gate evaluation, the active holds, and the last conformance read. Nothing in the state column is stored.</p><div class="scroll"><table class="grid"><thead><tr><th>stage</th><th>state (derived)</th><th>should carry (intent)</th><th>carries (observed)</th></tr></thead><tbody><tr><td><b>testing</b><div class="muted small">us-west-2 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F417</code><div class="muted small">Fri Aug 21 21:41 · policy:testing</div></td><td><code>F417</code><div class="muted small">since Fri Aug 21 22:05 · 2d 12h · update #6210</div></td></tr><tr><td><b>testing-eu</b><div class="muted small">eu-central-1 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F417</code><div class="muted small">Fri Aug 21 21:41 · policy:testing-eu</div></td><td><code>F417</code><div class="muted small">since Fri Aug 21 22:03 · 2d 12h · update #5120</div></td></tr><tr><td><b>staging</b><div class="muted small">us-west-2 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F417</code><div class="muted small">Mon Aug 24 09:01 · policy:staging</div></td><td><code>F417</code><div class="muted small">since Mon Aug 24 09:18 · 1h 32m · update #1415</div></td></tr><tr><td><b>production</b><div class="muted small">us-west-2 · internal-tools</div></td><td><span class="chip ok"><span class="glyph">●</span>converged</span></td><td><code>F417</code><div class="muted small">Mon Aug 24 10:05 · policy:production</div></td><td><code>F417</code><div class="muted small">since Mon Aug 24 10:31 · 19m · update #3184</div></td></tr><tr><td><b>production-eu</b><div class="muted small">eu-central-1 · internal-tools</div></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span><div class="small">approval: oncall (plan not safe: migrations or destructive steps) · <b>6m</b> (since Mon Aug 24 10:44)</div></td><td><code>F416</code> <span class="muted">→ F417 offered</span><div class="muted small">Tue Aug 18 10:47 · policy:production-eu</div></td><td><code>F416</code><div class="muted small">since Tue Aug 18 11:05 · 5d 23h · update #2064</div></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_grid AS
+SELECT s.ord, s.stage, s.region, s.owner, s.url, s.ops,
+       d.freight        AS desired,
+       d.decided_at,
+       d.decided_by,
+       k.freight        AS carried,
+       k.since          AS carried_since,
+       k.ops_update,
+       i.transition     AS inflight,
+       i.last_phase,
+       ge.freight       AS candidate,
+       ge.awaiting,
+       ge.awaiting_since,
+       ge.held_until,
+       CASE
+         WHEN i.transition IS NOT NULL                             THEN &#x27;in-flight&#x27;
+         WHEN lf.outcome = &#x27;failed&#x27; AND d.freight &lt;&gt; k.freight     THEN &#x27;failed&#x27;
+         WHEN ge.freight IS NOT NULL AND ge.freight &lt;&gt; d.freight
+              AND ge.held_until IS NOT NULL                        THEN &#x27;held&#x27;
+         WHEN ge.freight IS NOT NULL AND ge.freight &lt;&gt; d.freight
+              AND ge.passes = 0                                    THEN &#x27;awaiting&#x27;
+         WHEN ge.freight IS NOT NULL AND ge.freight &lt;&gt; d.freight
+              AND ge.passes = 1                                    THEN &#x27;ready&#x27;
+         WHEN d.freight = k.freight                                THEN &#x27;converged&#x27;
+         ELSE &#x27;pending&#x27;
+       END AS status,
+       CASE WHEN o.mismatches &gt; 0 THEN
+         o.mismatch_detail ||
+         CASE WHEN bg.fact IS NOT NULL
+              THEN &#x27; — break-glass &#x27; || bg.incident || &#x27; (&#x27; || bg.fact || &#x27;)&#x27;
+              ELSE &#x27; — UNEXPLAINED&#x27; END
+       END AS drift,
+       o.ts AS observed_at,
+       h.until_ts AS hold_until, h.actor AS hold_by, h.rationale AS hold_rationale
+FROM v_stage s
+LEFT JOIN v_desired       d  ON d.stage  = s.stage
+LEFT JOIN v_carried       k  ON k.stage  = s.stage
+LEFT JOIN v_inflight      i  ON i.stage  = s.stage AND i.stack = &#x27;service&#x27;
+LEFT JOIN v_last_finished lf ON lf.stage = s.stage
+LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
+LEFT JOIN v_observed      o  ON o.stage  = s.stage
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_hold          h  ON h.stage  = s.stage
+ORDER BY s.ord;
+
+CREATE VIEW v_gate_eval AS
+SELECT g.*, c.available_at,
+  CASE g.stage
+    WHEN &#x27;testing&#x27;       THEN 1
+    WHEN &#x27;testing-eu&#x27;    THEN 1
+    WHEN &#x27;staging&#x27;       THEN (g.upstream_integration_at IS NOT NULL)
+    WHEN &#x27;production&#x27;    THEN (g.upstream_integration_at IS NOT NULL
+                               AND g.staging_smoke_at IS NOT NULL
+                               AND g.staging_loadgen_at IS NOT NULL
+                               AND g.approved_at IS NOT NULL)
+    WHEN &#x27;production-eu&#x27; THEN (g.upstream_carried_at IS NOT NULL
+                               AND g.upstream_integration_at IS NOT NULL
+                               AND g.held_until IS NULL
+                               AND (g.plan_safe = 1 OR g.approved_at IS NOT NULL))
+  END AS passes,
+  CASE g.stage
+    WHEN &#x27;staging&#x27; THEN
+      CASE WHEN g.upstream_integration_at IS NULL THEN &#x27;verification: integration-tests in testing&#x27; END
+    WHEN &#x27;production&#x27; THEN
+      CASE WHEN g.upstream_integration_at IS NULL THEN &#x27;verification: integration-tests in staging&#x27;
+           WHEN g.staging_smoke_at IS NULL        THEN &#x27;verification: smoke in staging&#x27;
+           WHEN g.staging_loadgen_at IS NULL      THEN &#x27;verification: load-generator in staging&#x27;
+           WHEN g.approved_at IS NULL             THEN &#x27;approval: oncall (merge release PR)&#x27; END
+    WHEN &#x27;production-eu&#x27; THEN
+      CASE WHEN g.upstream_carried_at IS NULL     THEN &#x27;production to carry &#x27; || g.freight
+           WHEN g.upstream_integration_at IS NULL THEN &#x27;verification: integration-tests in production&#x27;
+           WHEN g.held_until IS NOT NULL          THEN &#x27;hold until &#x27; || g.held_until
+           WHEN g.plan_safe IS NULL               THEN &#x27;plan for production-eu&#x27;
+           WHEN g.plan_safe = 0 AND g.approved_at IS NULL
+                                                  THEN &#x27;approval: oncall (plan not safe: migrations or destructive steps)&#x27; END
+  END AS awaiting,
+  max(coalesce(c.available_at, &#x27;&#x27;),
+      coalesce(g.upstream_integration_at, &#x27;&#x27;),
+      coalesce(g.staging_smoke_at, &#x27;&#x27;),
+      coalesce(g.staging_loadgen_at, &#x27;&#x27;),
+      coalesce(g.upstream_carried_at, &#x27;&#x27;)) AS awaiting_since
+FROM v_gate_all g
+JOIN v_candidate c ON c.stage = g.stage AND c.freight = g.freight;
+
+CREATE VIEW v_candidate AS
+SELECT s.stage,
+  CASE
+    WHEN s.upstream = &#x27;warehouse:master&#x27; THEN
+      (SELECT fr.freight FROM v_freight fr WHERE fr.branch = &#x27;master&#x27; ORDER BY fr.discovered_at DESC LIMIT 1)
+    WHEN s.upstream = &#x27;release-train&#x27; THEN
+      (SELECT fr.freight FROM v_freight fr WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC LIMIT 1)
+    ELSE
+      (SELECT k.freight FROM v_carried k WHERE k.stage = s.upstream)
+  END AS freight,
+  CASE
+    WHEN s.upstream = &#x27;warehouse:master&#x27; THEN
+      (SELECT fr.discovered_at FROM v_freight fr WHERE fr.branch = &#x27;master&#x27; ORDER BY fr.discovered_at DESC LIMIT 1)
+    WHEN s.upstream = &#x27;release-train&#x27; THEN
+      (SELECT fr.cut_at FROM v_freight fr WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC LIMIT 1)
+    ELSE
+      (SELECT k.since FROM v_carried k WHERE k.stage = s.upstream)
+  END AS available_at
+FROM v_stage s;</pre></details></section><section id="lanes"><div class="eyebrow">1 · freight lanes</div><h2>Freight × stage</h2><p class="blurb">Each freight runs vertically through the stages it has reached. A cell is the time the enactment finished there, or what the freight is waiting on to get there. The same content-keyed freight moves through every stage — the testing build <em>is</em> the release.</p><div class="scroll"><table class="lanes"><thead><tr><th>freight</th><th>testing</th><th>testing-eu</th><th>staging</th><th>production</th><th>production-eu</th></tr></thead><tbody><tr><td><b>F417</b><div class="muted small">release PR #14876 · cut Mon Aug 24 09:00</div></td><td><span class="reached">Fri Aug 21 22:05</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="reached">Fri Aug 21 22:03</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="reached">Mon Aug 24 09:18</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="reached">Mon Aug 24 10:31</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span><div class="small">approval: oncall (plan not safe: migrations or destructive steps)<br><span class="muted">6m</span></div></td></tr><tr><td><b>F416</b><div class="muted small">release PR #14870 · cut Tue Aug 18 09:00</div></td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="reached">Tue Aug 18 09:18</span></td><td><span class="reached">Tue Aug 18 10:34</span></td><td><span class="reached">Tue Aug 18 11:05</span> <span class="chip ok tiny"><span class="glyph">●</span>current</span></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_lanes AS
+SELECT fr.freight, fr.release_pr, fr.cut_at, fr.discovered_at, s.stage, s.ord,
+  (SELECT min(t.finished_at) FROM v_transition t
+    WHERE t.stage = s.stage AND t.freight = fr.freight
+      AND t.stack = &#x27;service&#x27; AND t.outcome = &#x27;succeeded&#x27;)       AS reached_at,
+  (SELECT t.started_at FROM v_transition t
+    WHERE t.stage = s.stage AND t.freight = fr.freight
+      AND t.stack = &#x27;service&#x27; AND t.finished_at IS NULL)         AS inflight_since,
+  CASE WHEN ge.freight = fr.freight AND ge.passes = 0
+        AND (d.freight IS NULL OR d.freight &lt;&gt; fr.freight)
+       THEN ge.awaiting END                                      AS awaiting,
+  CASE WHEN ge.freight = fr.freight AND ge.passes = 0
+        AND (d.freight IS NULL OR d.freight &lt;&gt; fr.freight)
+       THEN ge.awaiting_since END                                AS awaiting_since,
+  (k.freight = fr.freight)                                       AS is_current
+FROM v_freight fr
+CROSS JOIN v_stage s
+LEFT JOIN v_gate_eval ge ON ge.stage = s.stage
+LEFT JOIN v_desired   d  ON d.stage  = s.stage
+LEFT JOIN v_carried   k  ON k.stage  = s.stage;</pre></details></section><section id="awaiting"><div class="eyebrow">2 · awaiting ≠ failure</div><h2>Production is waiting, not broken</h2><p class="blurb">The gate is a query joining both fact classes, evaluated at rest. What it lacks is an approval fact; until one arrives the stage is <em>awaiting</em>, rendered as an honest open item with a duration — not as a failed run. Suspending holds no compute: there is no runner parked on this.</p><p class="lede">Candidate <code>F417</code> for <b>production</b> (policy: gated). Gate <code>verified(staging, F, &#x27;integration-tests&#x27;) AND verified(staging, F, &#x27;smoke&#x27;) AND verified(staging, F, &#x27;load-generator&#x27;) AND approved(production, F, role = &#x27;oncall&#x27;)</code> passes.</p><div class="scroll"><table class=""><thead><tr><th></th><th>requirement</th><th>satisfied at</th><th>evidence</th></tr></thead><tbody><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>verified in staging: integration-tests</td><td>Mon Aug 24 09:30</td><td>412 tests, 0 failures <a class="fact" href="#f052">f052</a></td></tr><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>verified in staging: smoke</td><td>Mon Aug 24 09:32</td><td>deploy-smoke-test green <a class="fact" href="#f053">f053</a></td></tr><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>verified in staging: load-generator</td><td>Mon Aug 24 09:38</td><td>100% success over 10m <a class="fact" href="#f054">f054</a></td></tr><tr><td><span class="chip ok"><span class="glyph">✓</span>met</span></td><td>approved by oncall (merge of the release PR)</td><td>Mon Aug 24 10:05</td><td>user:maya <a class="fact" href="#f056">f056</a></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_gate_all AS
+SELECT s.stage, fr.freight, p.mode, p.rule,
+  (SELECT v.ts FROM v_verified v
+    WHERE v.stage = s.verify_in AND v.freight = fr.freight
+      AND v.chk = &#x27;integration-tests&#x27; AND v.outcome = &#x27;pass&#x27;)  AS upstream_integration_at,
+  (SELECT v.ts FROM v_verified v
+    WHERE v.stage = &#x27;staging&#x27; AND v.freight = fr.freight
+      AND v.chk = &#x27;smoke&#x27; AND v.outcome = &#x27;pass&#x27;)              AS staging_smoke_at,
+  (SELECT v.ts FROM v_verified v
+    WHERE v.stage = &#x27;staging&#x27; AND v.freight = fr.freight
+      AND v.chk = &#x27;load-generator&#x27; AND v.outcome = &#x27;pass&#x27;)     AS staging_loadgen_at,
+  (SELECT k.since FROM v_carried k
+    WHERE k.stage = s.upstream AND k.freight = fr.freight)      AS upstream_carried_at,
+  (SELECT a.ts FROM v_approval a
+    WHERE a.stage = s.stage AND a.freight = fr.freight)         AS approved_at,
+  (SELECT a.actor FROM v_approval a
+    WHERE a.stage = s.stage AND a.freight = fr.freight)         AS approved_by,
+  (SELECT a.fact FROM v_approval a
+    WHERE a.stage = s.stage AND a.freight = fr.freight)         AS approval_fact,
+  (SELECT pl.safe FROM v_plan pl
+    WHERE pl.stage = s.stage AND pl.freight = fr.freight)       AS plan_safe,
+  (SELECT pl.migrations_changed FROM v_plan pl
+    WHERE pl.stage = s.stage AND pl.freight = fr.freight)       AS migrations_changed,
+  (SELECT pl.fact FROM v_plan pl
+    WHERE pl.stage = s.stage AND pl.freight = fr.freight)       AS plan_fact,
+  (SELECT h.until_ts FROM v_hold h WHERE h.stage = s.stage)     AS held_until,
+  (SELECT h.fact FROM v_hold h WHERE h.stage = s.stage)         AS hold_fact
+FROM v_stage s
+CROSS JOIN v_freight fr
+JOIN v_policy p ON p.stage = s.stage;</pre></details></section><section id="trace"><div class="eyebrow">3 · where is my change</div><h2>PR → freight → stages</h2><p class="blurb">Keith's tracker reconstructs this by mining CI logs and commit subjects. Here it is a join: the freight names its PRs, the lanes say where the freight is. A PR merged after the cut is not <em>unreleased</em> — it is in testing, with a timestamp, because testing is a stage.</p><div class="scroll"><table class="trace"><thead><tr><th>change</th><th>where is it</th><th>testing</th><th>testing-eu</th><th>staging</th><th>production</th><th>production-eu</th></tr></thead><tbody><tr><td><b>#46140</b> Bump workflow image to 2026.08.21<div class="muted small">priya · F417 · release PR #14876</div></td><td>in <b>production</b> since Mon Aug 24 10:31<div class="small amber-text">next — production-eu: approval: oncall (plan not safe: migrations or destructive steps)</div></td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="reached">Mon Aug 24 10:31</span></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span></td></tr><tr><td><b>#46133</b> Tighten rate limits on /api/stacks<div class="muted small">amina · F417 · release PR #14876</div></td><td>in <b>production</b> since Mon Aug 24 10:31<div class="small amber-text">next — production-eu: approval: oncall (plan not safe: migrations or destructive steps)</div></td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="reached">Mon Aug 24 10:31</span></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span></td></tr><tr><td><b>#46120</b> Migrate stack tags to new table<div class="muted small">jonas · F417 · release PR #14876</div></td><td>in <b>production</b> since Mon Aug 24 10:31<div class="small amber-text">next — production-eu: approval: oncall (plan not safe: migrations or destructive steps)</div></td><td><span class="reached">Fri Aug 21 22:05</span></td><td><span class="reached">Fri Aug 21 22:03</span></td><td><span class="reached">Mon Aug 24 09:18</span></td><td><span class="reached">Mon Aug 24 10:31</span></td><td><span class="chip amber"><span class="glyph">○</span>awaiting</span></td></tr><tr><td><b>#46101</b> Jobs: retry webhook deliveries with backoff<div class="muted small">jonas · F416 · release PR #14870</div></td><td>in <b>production-eu</b> since Tue Aug 18 11:05</td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="reached">Tue Aug 18 09:18</span></td><td><span class="reached">Tue Aug 18 10:34</span></td><td><span class="reached">Tue Aug 18 11:05</span></td></tr><tr><td><b>#46098</b> Console: new stack list empty state<div class="muted small">amina · F416 · release PR #14870</div></td><td>in <b>production-eu</b> since Tue Aug 18 11:05</td><td><span class="muted">—</span></td><td><span class="muted">—</span></td><td><span class="reached">Tue Aug 18 09:18</span></td><td><span class="reached">Tue Aug 18 10:34</span></td><td><span class="reached">Tue Aug 18 11:05</span></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_trace AS
+SELECT json_extract(pr.value, &#x27;$.number&#x27;) AS pr,
+       json_extract(pr.value, &#x27;$.title&#x27;)  AS title,
+       json_extract(pr.value, &#x27;$.author&#x27;) AS author,
+       fr.freight, fr.release_pr,
+       l.stage, l.ord, l.reached_at, l.inflight_since, l.awaiting, l.awaiting_since, l.is_current
+FROM v_freight fr, json_each(fr.prs) pr
+JOIN v_lanes l ON l.freight = fr.freight;
+
+CREATE VIEW v_trace_summary AS
+SELECT t.pr, t.title, t.author, t.freight, t.release_pr,
+  (SELECT t2.stage FROM v_trace t2 WHERE t2.pr = t.pr AND t2.reached_at IS NOT NULL
+     ORDER BY t2.ord DESC LIMIT 1)                               AS furthest_stage,
+  (SELECT t2.reached_at FROM v_trace t2 WHERE t2.pr = t.pr AND t2.reached_at IS NOT NULL
+     ORDER BY t2.ord DESC LIMIT 1)                               AS furthest_at,
+  (SELECT t2.stage || &#x27;: &#x27; || t2.awaiting || &#x27; (since &#x27; || t2.awaiting_since || &#x27;)&#x27;
+     FROM v_trace t2 WHERE t2.pr = t.pr AND t2.awaiting IS NOT NULL
+     ORDER BY t2.ord LIMIT 1)                                    AS next,
+  CASE WHEN t.release_pr IS NULL THEN &#x27;not in a release yet (next cut picks it up)&#x27; END AS note
+FROM v_trace t
+GROUP BY t.pr;</pre></details></section><section id="diffgate"><div class="eyebrow">4 · a diff-gate</div><h2>"If migrations changed, require approval; otherwise fast-track"</h2><p class="blurb">Joe's question, answered as a query: the plan is a fact (stage 3 of the key decomposition — desired × world at T), so a gate can read it. Three freights, same rule, three different outcomes. The rule is evaluable before the freight is even a candidate — the plan for F418 was computed ahead.</p><p class="lede">production-eu policy: <code>carried(production, F) AND verified(production, F, &#x27;integration-tests&#x27;) AND NOT held(production-eu) AND (plan(production-eu, F).safe OR approved(production-eu, F, role = &#x27;oncall&#x27;))</code><br>where <em>safe</em> = <code>plan.delete = 0 AND plan.replace = 0 AND NOT plan.migrations_changed</code></p><div class="scroll"><table class=""><thead><tr><th>freight</th><th>plan for production-eu</th><th>upstream</th><th>gate outcome</th></tr></thead><tbody><tr><td><code>F416</code></td><td>+1 ~9 −0 ±0 <a class="fact" href="#f027">f027</a><div class="small muted">against F415</div></td><td><span class="muted">production does not carry it yet</span></td><td><span class="chip ok"><span class="glyph">▸</span>auto</span><div class="small">safe plan — no approval needed</div></td></tr><tr><td><code>F417</code></td><td>+3 ~11 −0 ±0 <a class="fact" href="#f067">f067</a><div class="small muted">against F416</div><div class="small"><span class="glyph">⚠</span> migrations: 20260821_stack_tags.sql</div></td><td>production carried it Mon Aug 24 10:31</td><td><span class="chip amber"><span class="glyph">○</span>would require approval</span><div class="small">not safe — evaluated ahead of candidacy</div></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_plan AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, &#x27;$.freight&#x27;)         AS freight,
+       json_extract(f.payload, &#x27;$.against&#x27;)         AS against,
+       json_extract(f.payload, &#x27;$.create&#x27;)          AS n_create,
+       json_extract(f.payload, &#x27;$.update&#x27;)          AS n_update,
+       json_extract(f.payload, &#x27;$.delete&#x27;)          AS n_delete,
+       json_extract(f.payload, &#x27;$.replace&#x27;)         AS n_replace,
+       json_extract(f.payload, &#x27;$.migrations_changed&#x27;) AS migrations_changed,
+       json_extract(f.payload, &#x27;$.migrations&#x27;)      AS migrations,
+       (json_extract(f.payload, &#x27;$.delete&#x27;) = 0
+        AND json_extract(f.payload, &#x27;$.replace&#x27;) = 0
+        AND NOT json_extract(f.payload, &#x27;$.migrations_changed&#x27;)) AS safe,
+       f.ts, f.id                                   AS fact
+FROM facts f
+WHERE f.kind = &#x27;plan.summarized&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;plan.summarized&#x27; AND g.subject = f.subject
+                AND json_extract(g.payload, &#x27;$.freight&#x27;) = json_extract(f.payload, &#x27;$.freight&#x27;));</pre></details></section><section id="uptake"><div class="eyebrow">5 · a pending uptake</div><h2>Publication is evidence; uptake is intent</h2><p class="blurb">The AMI bake published a new record. The worker pool's binding declares a gated uptake, so the grid shows <em>available, gated</em> with a preview — instead of an instance refresh nobody decided on. Blast radius is <code>consumers WHERE pending</code>: one.</p><div class="scroll"><table class=""><thead><tr><th>consumer · binding</th><th>published (evidence)</th><th>taken up (intent)</th><th>state</th></tr></thead><tbody><tr><td><b>workflow-pool@production</b><div class="small muted">ami_id ← workflow-ami@production</div></td><td>v12 <code>ami-0a17c4d2e9b3f5a61</code><div class="small muted">published Wed Aug 19 08:00 <a class="fact" href="#f032">f032</a></div></td><td>v12<div class="small muted">Wed Aug 19 09:30 · user:priya</div></td><td><span class="chip ok"><span class="glyph">●</span>current at v12</span><div class="small muted">An instance refresh drains the hot pool. Approve the trigger; never auto-uptake.</div></td></tr><tr><td><b>workflow-pool@production-eu</b><div class="small muted">ami_id ← workflow-ami@production-eu</div></td><td>v9 <code>ami-0c58e1f7a2d4b9c03</code><div class="small muted">published Wed Aug 19 08:10 <a class="fact" href="#f033">f033</a></div></td><td>v9<div class="small muted">Wed Aug 19 10:05 · user:priya</div></td><td><span class="chip ok"><span class="glyph">●</span>current at v9</span><div class="small muted">Same as US: approve the trigger.</div></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_pending_uptake AS
+SELECT e.consumer, e.producer, e.key, e.uptake AS policy,
+       r.version                                              AS published_version,
+       r.ts                                                   AS published_at,
+       json_extract(r.payload, &#x27;$.values.&#x27; || e.key)          AS published_value,
+       r.fact                                                 AS published_fact,
+       u.version                                              AS consumed_version,
+       u.ts                                                   AS consumed_at,
+       u.actor                                                AS consumed_by,
+       (r.version &gt; coalesce(u.version, 0))                   AS pending,
+       &#x27;preview &#x27; || e.consumer || &#x27; with &#x27; || e.key || &#x27; = &#x27;
+         || json_extract(r.payload, &#x27;$.values.&#x27; || e.key)     AS preview,
+       e.description
+FROM v_edge e
+LEFT JOIN v_record  r ON r.producer = e.producer
+LEFT JOIN v_uptaken u ON u.edge = e.edge;
+
+CREATE VIEW v_record AS
+SELECT substr(f.subject, 8)                         AS producer,
+       json_extract(f.payload, &#x27;$.version&#x27;)         AS version,
+       f.payload                                    AS payload,
+       json_extract(f.payload, &#x27;$.produced_by&#x27;)     AS produced_by,
+       f.ts, f.id                                   AS fact
+FROM facts f
+WHERE f.kind = &#x27;output.published&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;output.published&#x27; AND g.subject = f.subject);
+
+CREATE VIEW v_uptaken AS
+SELECT f.subject                                    AS edge,
+       json_extract(f.payload, &#x27;$.record_version&#x27;)  AS version,
+       f.actor, f.ts, f.rationale, f.id             AS fact
+FROM facts f
+WHERE f.kind = &#x27;uptake.decided&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;uptake.decided&#x27; AND g.subject = f.subject);</pre></details></section><section id="oob"><div class="eyebrow">the side door</div><h2>Out-of-band reality</h2><p class="blurb"></p><p class="muted">no conformance reads yet.</p><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_observed AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, &#x27;$.services&#x27;)        AS services,
+       json_extract(f.payload, &#x27;$.source&#x27;)          AS source,
+       f.ts, f.id                                   AS fact,
+       (SELECT count(*) FROM json_each(json_extract(f.payload, &#x27;$.services&#x27;)) je
+         WHERE je.value &lt;&gt; (SELECT d.freight FROM v_desired d WHERE d.stage = substr(f.subject, 7)))
+                                                    AS mismatches,
+       (SELECT group_concat(je.key || &#x27;@&#x27; || je.value, &#x27;, &#x27;)
+          FROM json_each(json_extract(f.payload, &#x27;$.services&#x27;)) je
+         WHERE je.value &lt;&gt; (SELECT d.freight FROM v_desired d WHERE d.stage = substr(f.subject, 7)))
+                                                    AS mismatch_detail
+FROM facts f
+WHERE f.kind = &#x27;state.observed&#x27;
+  AND f.ts = (SELECT max(g.ts) FROM facts g
+              WHERE g.kind = &#x27;state.observed&#x27; AND g.subject = f.subject);</pre></details></section><section id="releases"><div class="eyebrow">Keith parity</div><h2>Release trains</h2><p class="blurb">The past-releases cards: cut, staged, approved by whom, live where. One query over lanes and approvals.</p><div class="scroll"><table class=""><thead><tr><th>release</th><th>cut</th><th>staging</th><th>approved</th><th>production</th><th>production-eu</th></tr></thead><tbody><tr><td><b>F417</b><div class="small muted">PR #14876 · release/staging@08242026-0900 · 7c9e2b4 · 3 PRs</div></td><td>Mon Aug 24 09:00</td><td>Mon Aug 24 09:18</td><td>user:maya<div class="small muted">Mon Aug 24 10:05</div></td><td>Mon Aug 24 10:31</td><td><span class="muted">—</span></td></tr><tr><td><b>F416</b><div class="small muted">PR #14870 · release/staging@08182026-0900 · 3d9f1a7 · 2 PRs</div></td><td>Tue Aug 18 09:00</td><td>Tue Aug 18 09:18</td><td>user:maya<div class="small muted">Tue Aug 18 10:10</div></td><td>Tue Aug 18 10:34</td><td>Tue Aug 18 11:05</td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_releases AS
+SELECT fr.freight, fr.release_pr, fr.release_branch, fr.cut_at, fr.sha,
+       json_array_length(fr.prs)                                          AS prs,
+       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = &#x27;staging&#x27;)       AS staging_at,
+       (SELECT a.actor FROM v_approval a WHERE a.stage = &#x27;production&#x27; AND a.freight = fr.freight)      AS approved_by,
+       (SELECT a.ts    FROM v_approval a WHERE a.stage = &#x27;production&#x27; AND a.freight = fr.freight)      AS approved_at,
+       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = &#x27;production&#x27;)    AS production_at,
+       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = &#x27;production-eu&#x27;) AS production_eu_at
+FROM v_freight fr
+WHERE fr.cut_at IS NOT NULL
+ORDER BY fr.cut_at DESC;</pre></details></section><section id="transitions"><div class="eyebrow">fact grain ≠ step grain</div><h2>Inside a transition</h2><p class="blurb">A transition is the enactment reified: one subject, many facts across one or more executions. Position lives in phase facts the grid can read (Monday's rollout ran both versions live for five minutes before cutover); resource steps land on the same subject when the executor emits them.</p><h3><code>transition:T417-prod</code> — F417 → production</h3><p class="small muted">Mon Aug 24 10:06 → Mon Aug 24 10:31 · 0 resource steps recorded · run gha:push-build/7803</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started · ecs-rolling (create before delete)</td><td><a class="fact" href="#f058">f058</a></td></tr><tr><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>provisioning</b> — new task definitions registered; new tasks starting alongside old</td><td><a class="fact" href="#f059">f059</a></td></tr><tr><td>Mon Aug 24 10:19</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>both-live</b> — old and new tasks serving; ALB health checks passing on new</td><td><a class="fact" href="#f060">f060</a></td></tr><tr><td>Mon Aug 24 10:24</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>cutover</b> — target groups shifted to new tasks</td><td><a class="fact" href="#f061">f061</a></td></tr><tr><td>Mon Aug 24 10:25</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>retiring</b> — draining old tasks</td><td><a class="fact" href="#f062">f062</a></td></tr><tr><td>Mon Aug 24 10:31</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>succeeded</b> · update #3184 · {&quot;create&quot;: 3, &quot;update&quot;: 11, &quot;delete&quot;: 0, &quot;replace&quot;: 0}</td><td><a class="fact" href="#f063">f063</a></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_transition AS
+SELECT s.subject                                    AS transition,
+       json_extract(s.payload, &#x27;$.stage&#x27;)           AS stage,
+       json_extract(s.payload, &#x27;$.freight&#x27;)         AS freight,
+       json_extract(s.payload, &#x27;$.stack&#x27;)           AS stack,
+       json_extract(s.payload, &#x27;$.record_version&#x27;)  AS record_version,
+       json_extract(s.payload, &#x27;$.run&#x27;)             AS run,
+       json_extract(s.payload, &#x27;$.strategy&#x27;)        AS strategy,
+       s.ts                                         AS started_at,
+       e.ts                                         AS finished_at,
+       json_extract(e.payload, &#x27;$.outcome&#x27;)         AS outcome,
+       json_extract(e.payload, &#x27;$.ops_update&#x27;)      AS ops_update,
+       json_extract(e.payload, &#x27;$.summary&#x27;)         AS summary,
+       (SELECT json_extract(p.payload, &#x27;$.phase&#x27;) FROM facts p
+         WHERE p.kind = &#x27;transition.phase&#x27; AND p.subject = s.subject
+         ORDER BY p.ts DESC LIMIT 1)                AS last_phase,
+       (SELECT count(*) FROM facts r
+         WHERE r.kind = &#x27;resource.step&#x27; AND r.subject = s.subject) AS resource_steps,
+       s.id                                         AS started_fact,
+       e.id                                         AS finished_fact
+FROM facts s
+LEFT JOIN facts e ON e.kind = &#x27;transition.finished&#x27; AND e.subject = s.subject
+WHERE s.kind = &#x27;transition.started&#x27;;</pre></details></section><section id="ledger"><div class="eyebrow">the record is the interface</div><h2>The ledger</h2><p class="blurb"></p><p class="lede">67 facts at this instant; the newest 14 below. Two classes, append-only, every row attributed. Every screen above is a SELECT over this.</p><div class="scroll"><table class="ledger"><thead><tr><th>id</th><th>when</th><th>class</th><th>kind</th><th>subject</th><th>actor</th><th>payload · rationale</th></tr></thead><tbody><tr><td><span id="f067"></span><code>f067</code></td><td>Mon Aug 24 10:45</td><td><span class="cls observation">observation</span></td><td><code>plan.summarized</code></td><td><code>stage:production-eu</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;against&quot;: &quot;F416&quot;, &quot;create&quot;: 3, &quot;update&quot;: 11, &quot;delete&quot;: 0, &quot;replace&quot;: 0, &quot;migrations_changed&quot;: true, &quot;migrations&quot;: [&quot;20260821_stack_tags.sql&quot;], &quot;run&quot;: &quot;gha:push-build/7803&quot;}</div></td></tr><tr><td><span id="f066"></span><code>f066</code></td><td>Mon Aug 24 10:44</td><td><span class="cls observation">observation</span></td><td><code>verification.recorded</code></td><td><code>stage:production</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;check&quot;: &quot;integration-tests&quot;, &quot;outcome&quot;: &quot;pass&quot;, &quot;detail&quot;: &quot;412 tests, 0 failures&quot;, &quot;run&quot;: &quot;gha:push-build/7803&quot;}</div></td></tr><tr><td><span id="f065"></span><code>f065</code></td><td>Mon Aug 24 10:34</td><td><span class="cls observation">observation</span></td><td><code>job.finished</code></td><td><code>stage:production</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;job&quot;: &quot;notify-deployed-prs&quot;, &quot;outcome&quot;: &quot;failed&quot;, &quot;optional&quot;: true, &quot;detail&quot;: &quot;GitHub rate-limited; nothing downstream reads this&quot;}</div></td></tr><tr><td><span id="f064"></span><code>f064</code></td><td>Mon Aug 24 10:33</td><td><span class="cls observation">observation</span></td><td><code>job.finished</code></td><td><code>stage:production</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;job&quot;: &quot;sentry-release&quot;, &quot;outcome&quot;: &quot;succeeded&quot;, &quot;optional&quot;: false, &quot;detail&quot;: &quot;release marked in Sentry&quot;}</div></td></tr><tr><td><span id="f063"></span><code>f063</code></td><td>Mon Aug 24 10:31</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td><code>transition:T417-prod</code></td><td>ci:gha</td><td><div class="payload">{&quot;outcome&quot;: &quot;succeeded&quot;, &quot;ops_update&quot;: 3184, &quot;summary&quot;: {&quot;create&quot;: 3, &quot;update&quot;: 11, &quot;delete&quot;: 0, &quot;replace&quot;: 0}}</div></td></tr><tr><td><span id="f062"></span><code>f062</code></td><td>Mon Aug 24 10:25</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td><code>transition:T417-prod</code></td><td>ci:gha</td><td><div class="payload">{&quot;phase&quot;: &quot;retiring&quot;, &quot;detail&quot;: &quot;draining old tasks&quot;}</div></td></tr><tr><td><span id="f061"></span><code>f061</code></td><td>Mon Aug 24 10:24</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td><code>transition:T417-prod</code></td><td>ci:gha</td><td><div class="payload">{&quot;phase&quot;: &quot;cutover&quot;, &quot;detail&quot;: &quot;target groups shifted to new tasks&quot;}</div></td></tr><tr><td><span id="f060"></span><code>f060</code></td><td>Mon Aug 24 10:19</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td><code>transition:T417-prod</code></td><td>ci:gha</td><td><div class="payload">{&quot;phase&quot;: &quot;both-live&quot;, &quot;detail&quot;: &quot;old and new tasks serving; ALB health checks passing on new&quot;}</div></td></tr><tr><td><span id="f059"></span><code>f059</code></td><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td><code>transition:T417-prod</code></td><td>ci:gha</td><td><div class="payload">{&quot;phase&quot;: &quot;provisioning&quot;, &quot;detail&quot;: &quot;new task definitions registered; new tasks starting alongside old&quot;}</div></td></tr><tr><td><span id="f058"></span><code>f058</code></td><td>Mon Aug 24 10:06</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td><code>transition:T417-prod</code></td><td>ci:gha</td><td><div class="payload">{&quot;stage&quot;: &quot;production&quot;, &quot;freight&quot;: &quot;F417&quot;, &quot;stack&quot;: &quot;service&quot;, &quot;run&quot;: &quot;gha:push-build/7803&quot;, &quot;strategy&quot;: &quot;ecs-rolling (create before delete)&quot;}</div></td></tr><tr><td><span id="f057"></span><code>f057</code></td><td>Mon Aug 24 10:05</td><td><span class="cls intent">intent</span></td><td><code>promotion.decided</code></td><td><code>stage:production</code></td><td>policy:production</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;}</div><div class="small"><em>gate satisfied: verified in staging (integration, smoke, load-generator) and approved by oncall</em></div></td></tr><tr><td><span id="f056"></span><code>f056</code></td><td>Mon Aug 24 10:05</td><td><span class="cls intent">intent</span></td><td><code>approval.granted</code></td><td><code>stage:production</code></td><td>user:maya</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;role&quot;: &quot;oncall&quot;, &quot;via&quot;: &quot;merged release PR #14876&quot;}</div><div class="small"><em>staging clean; the stack-tags migration is additive (new table, no drops)</em></div></td></tr><tr><td><span id="f055"></span><code>f055</code></td><td>Mon Aug 24 09:40</td><td><span class="cls observation">observation</span></td><td><code>plan.summarized</code></td><td><code>stage:production</code></td><td>ci:gha</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;against&quot;: &quot;F416&quot;, &quot;create&quot;: 3, &quot;update&quot;: 11, &quot;delete&quot;: 0, &quot;replace&quot;: 0, &quot;migrations_changed&quot;: true, &quot;migrations&quot;: [&quot;20260821_stack_tags.sql&quot;], &quot;run&quot;: &quot;gha:pr-build/7801&quot;}</div></td></tr><tr><td><span id="f054"></span><code>f054</code></td><td>Mon Aug 24 09:38</td><td><span class="cls observation">observation</span></td><td><code>verification.recorded</code></td><td><code>stage:staging</code></td><td>watch:load-generator</td><td><div class="payload">{&quot;freight&quot;: &quot;F417&quot;, &quot;check&quot;: &quot;load-generator&quot;, &quot;outcome&quot;: &quot;pass&quot;, &quot;detail&quot;: &quot;100% success over 10m&quot;}</div></td></tr></tbody></table></div><details class="sql"><summary>the table</summary><pre>-- The ledger: one append-only table, two fact classes, every row attributed.
+--
+-- Everything else in this repo is a query over this table. If a view ever
+-- needs a second mutable table to render, that is a design smell — record it
+-- in smells.md rather than adding the table.
+
+CREATE TABLE facts (
+  seq       INTEGER PRIMARY KEY,           -- arrival order; the ledger is append-only
+  id        TEXT    NOT NULL UNIQUE,       -- stable handle so facts can cite facts
+  ts        TEXT    NOT NULL,              -- ISO-8601 UTC
+  class     TEXT    NOT NULL CHECK (class IN (&#x27;intent&#x27;, &#x27;observation&#x27;)),
+  kind      TEXT    NOT NULL,              -- e.g. promotion.decided, transition.finished
+  subject   TEXT    NOT NULL,              -- &#x27;&lt;type&gt;:&lt;name&gt;&#x27; — stage:, freight:, transition:, edge:, record:
+  actor     TEXT    NOT NULL,              -- who/what wrote it: user:, policy:, cron:, ci:, watch:
+  payload   TEXT    NOT NULL DEFAULT &#x27;{}&#x27; CHECK (json_valid(payload)),
+  rationale TEXT,                          -- why (intent facts)
+  refs      TEXT    NOT NULL DEFAULT &#x27;[]&#x27; CHECK (json_valid(refs))  -- fact ids this one answers to
+);
+
+CREATE INDEX facts_subject ON facts (subject, ts);
+CREATE INDEX facts_kind    ON facts (kind, ts);
+
+-- The only non-ledger state: what time it is. Views that ask &quot;active now?&quot;
+-- (holds) read it. The renderer sets it so the fixture renders the same at any
+-- wall-clock time.
+CREATE TABLE clock (now TEXT NOT NULL);
+</pre></details></section></div>
+<footer>Fixture: the pulumi-service weekday release train (testing on every master push; staging from the release PR;
+oncall's merge is production's approval; production-eu follows when the plan is boring), plus the worker-pool AMI edge.
+Hand-written facts; the views are real. Source: <code>~/src/nyobe/delivery-ledger</code>.</footer>
+</div>
+<script>
+(function () {
+  var buttons = document.querySelectorAll('nav.snaps button');
+  var snaps = document.querySelectorAll('.snapshot');
+  var clock = document.querySelector('.clock .now');
+  function show(id) {
+    snaps.forEach(function (s) { s.hidden = s.dataset.asof !== id; });
+    buttons.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.asof === id)); });
+    if (clock) clock.textContent = id;
+    try { localStorage.setItem('ledger.asof', id); } catch (e) {}
+  }
+  buttons.forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.asof); }); });
+  var initial = buttons[0] && buttons[0].dataset.asof;
+  try { var saved = localStorage.getItem('ledger.asof'); if (saved && document.querySelector('.snapshot[data-asof="' + saved + '"]')) initial = saved; } catch (e) {}
+  if (initial) show(initial);
+})();
+</script>
