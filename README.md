@@ -21,7 +21,9 @@ subjects × intent/observation facts × promotion × freight.
 ./render.py --scenario <name>              # another directory under scenarios/
 ./render.py --lint-only
 ./render.py --as-of 2026-08-24T16:20:00Z   # the ledger as it stood at that instant
-./render.py --pure                         # views evaluated on demand (slow); must render the same page
+./render.py --pure                         # views evaluated on demand (slow); the deep views may not evaluate
+./render.py --pure-check                   # every view's rows, materialised vs pure, at the primary instant
+./shot.sh multistack 2400 /tmp/ms.png      # headless-Chrome screenshot of a rendered page, for eyes without a browser
 ```
 
 Python 3 and its bundled sqlite3; no dependencies. Open `out/<scenario>/index.html`.
