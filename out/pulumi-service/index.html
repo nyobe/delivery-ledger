@@ -1,5 +1,5 @@
 <title>Service Release Ledger</title>
-<meta name="description" content="pulumi-service's release train, rendered as queries over a two-class fact ledger">
+<meta name="description" content="pulumi-service&#x27;s release train, rendered as queries over a two-class fact ledger">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:ital,wght@0,400;0,600;1,400&family=Source+Serif+4:opsz,wght@8..60,600&display=swap">
 <style>
@@ -94,10 +94,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 1rem; color: var(--mute
   <div>
     <div class="kicker">pulumi-service · delivery ledger · fixture</div>
     <h1>Service Release Ledger</h1>
-    <p class="thesis">The release tracker, derived: every screen below is a query over one append-only table of
-    attributed facts — <span class="cls intent">intent</span> (decisions, approvals, holds, break-glass) and
-    <span class="cls observation">observation</span> (enactments, verifications, plans, conformance reads).
-    Nothing is stored as status.</p>
+    <p class="thesis">The release tracker, derived: every screen below is a query over one append-only table of attributed facts — <span class="cls intent">intent</span> (decisions, approvals, holds, break-glass) and <span class="cls observation">observation</span> (enactments, verifications, plans, conformance reads). Nothing is stored as status.</p>
   </div>
   <div class="clock"><div class="label">ledger as of</div><div class="now">2026-08-26T17:45:00Z</div></div>
 </header>
@@ -2268,10 +2265,7 @@ CREATE INDEX facts_kind_subject ON facts (kind, subject, seq);
 -- wall-clock time.
 CREATE TABLE clock (now TEXT NOT NULL);
 </pre></details></section></div>
-<footer>Fixture: the pulumi-service weekday release train (testing on master builds; staging from the release PR;
-oncall's merge is production's approval; production-eu as a proposed auto-if-safe follower — today it deploys in
-parallel), plus two worker-pool bindings. Generated from a timeline (<code>fixture.py</code>); the views are real.
-Source: <code>~/src/nyobe/delivery-ledger</code>.</footer>
+<footer>Fixture: the pulumi-service weekday release train (testing on master builds; staging from the release PR; oncall's merge is production's approval; production-eu as a proposed auto-if-safe follower — today it deploys in parallel), plus two worker-pool bindings. Generated from a timeline (<code>fixture.py</code>); the views are real. Source: <code>~/src/nyobe/delivery-ledger</code>.</footer>
 </div>
 <script>
 (function () {

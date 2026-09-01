@@ -14,23 +14,25 @@ subjects × intent/observation facts × promotion × freight.
 ## Run
 
 ```
-./fixture.py             # rewrite facts.jsonl from the timeline
-./render.py              # lint the fixture, run the self-checks, write out/index.html
+./scenarios/pulumi-service/fixture.py      # rewrite that scenario's facts.jsonl from its timeline
+./render.py                                # lint, self-check, write out/pulumi-service/index.html
+./render.py --scenario <name>              # another directory under scenarios/
 ./render.py --lint-only
 ./render.py --as-of 2026-08-24T16:20:00Z   # the ledger as it stood at that instant
 ```
 
-Python 3 and its bundled sqlite3; no dependencies. Open `out/index.html`.
+Python 3 and its bundled sqlite3; no dependencies. Open `out/<scenario>/index.html`.
 
 ## What is in here
 
 | file | role |
 |---|---|
 | `schema.sql` | the `facts` table (plus a one-row `clock`) — the only state |
-| `fixture.py` | the scenario as a timeline; emits `facts.jsonl` so one story can't drift into two |
-| `facts.jsonl` | the ledger: 132 facts across two weeks of the pipeline |
-| `views.sql` | every screen as a view: subjects → current state → gate terms → grid, lanes, trace, uptake, releases, audit |
+| `views.sql` | every screen as a view: subjects → current state → gate terms → grid, lanes, trace, uptake, releases, audit — shared by every scenario |
 | `render.py` | lint → self-checks (including mutation checks) → HTML; holds no state of its own |
+| `scenarios/<name>/fixture.py` | a scenario as a timeline; emits `facts.jsonl` beside it so one story can't drift into two |
+| `scenarios/<name>/facts.jsonl` | the ledger for that scenario (pulumi-service: 132 facts across two weeks of the pipeline) |
+| `scenarios/<name>/scenario.py` | the scenario's page chrome, snapshot instants, and self-checks |
 | `program.md` | the authoring side: what a delivery program *declares*, and which facts each declaration writes |
 | `smells.md` | the acceptance log: anywhere a view wanted state the ledger doesn't hold, and what the slice taught |
 
