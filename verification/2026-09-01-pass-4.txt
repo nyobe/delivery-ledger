@@ -1,0 +1,97 @@
+Verification pass 4 — the rollback and canary views (session 4a3b8005)
+=======================================================================
+
+Scope: the mechanisms added by the rollback (pulumi-service, Thursday) and
+canary (multistack, Wednesday) commits — direction, the three term floors,
+reversal, the rollback nomination, the live set and conformance, step gates,
+the as-of audit — not a full re-review of the earlier slices.
+
+Shape: one workflow, 47 agents. Ten hunters/lenses in parallel (six
+mutation hunters: approval floor, plan staleness, direction/reversal, live
+set/conformance, step gate, audit as-of; four lenses: SQL edges, claims vs
+code, render, design semantics), then one adversarial refuter per finding
+(reproduce from scratch; default to refuted). Two refuters failed to produce
+structured output and their findings were dropped unverified. Per-agent
+receipts: the session's `subagents/workflows/wf_03a73f18-4b6/journal.jsonl`.
+
+Result: 35 findings; 30 confirmed, 2 downgraded, 3 refuted.
+
+Escapes and bugs, fixed in the revision commit
+----------------------------------------------
+- The consent floor compared by clock (`ts >= moved_at`), not by arrival:
+  an approval sharing the reversal's second but arriving before it revived
+  consent — F418 read `ready` the instant the rollback landed; the aborted
+  canary read `ready`. Found by three agents independently; the audit's
+  as-of floor had the same hole (an approval arriving after the decision,
+  same second, was credited). Fixed: v_intent_moved carries the moving
+  decision's seq; v_approval.valid is `seq > moved_seq`; v_audit_ctx
+  floors on seq; v_step_term floors on the transition's started_seq.
+  Pinned: m_same_second_approval.
+- Rollback of a rollback: v_reversal stayed true for F418 after intent
+  returned to it, so lanes/trace/release cards said rolled-back while the
+  grid (an inline derivation) said pending. Fixed: a reversal holds only
+  while intent has not since returned to the freight (moved_seq >
+  last_seq), and the grid now reads v_reversal too — the "one derivation"
+  smells #39 claimed. Pinned: m_rollback_of_rollback.
+- Direction, reversal and cumulative membership ordered freights by
+  discovered_at alone; two freights discovered in the same second made a
+  rollback read as forward and dropped a PR from membership. Fixed:
+  (discovered_at, seq) for direction/reversal/audit; seq for membership.
+- v_freight had no latest-wins dedup; a second freight.discovered for the
+  same freight fanned the grid out to eight rows. Fixed: dedup, and a lint
+  rule that a freight is discovered once.
+- previously_carried read v_first_success (any stack), so on a multi-stack
+  stage a freight one stack ran satisfied the lookback. Fixed: requires
+  v_first_carried (every stack), keeps the last-any-stack time for the
+  window; unmet text says "never carried on every stack".
+- v_live collapsed on a multi-stack stage between legs (v_carried NULL →
+  no stable row → every observed service was drift), and read only the
+  single representative in-flight leg. Fixed: v_live is per stack — one
+  stable row per distinct carried-stack freight, one canary row per
+  distinct open-leg freight not carried — with weights only in the
+  single-stable/single-canary case. Pinned: the Tue 14:21:15 check and
+  m_observe_between_legs.
+- v_release_stage showed a lapsed approval as the standing one. Fixed:
+  valid filter; the card says "approval of T lapsed".
+- group_concat without ORDER BY in v_audit_decision and v_hold_active
+  (the class smells #18 records). Fixed with ordered subqueries.
+- A phase citing a step index past the declared steps silently dropped
+  the step gate; a rollback request naming another program's freight was
+  accepted as a candidate. Both are now lint errors.
+- Doc drift: program.md said direction compares to what the stage
+  *carries* (it compares to what it is *decided to*); smells #45 said two
+  step-term types where three exist; smells #38's worked example was not
+  reproducible (reworded on F417's boundary); README's pure-check count and
+  multistack mutation list were stale; the trace summary's
+  rolled_back_from was computed and checked but never rendered; the
+  pin-set's partial cell lost its per-stack detail.
+- Not pinned before, now pinned: the rollback block's not_held term as a
+  blocker (m_hold_during_request).
+
+Recorded as design smells, not changed (#52–#57)
+------------------------------------------------
+- A stage re-declared mid-rollout reinterprets the in-flight step index
+  under the new declaration (latest declaration wins); the transition
+  does not cite the declaration it was started under.
+- The step-gate block keys on the declared step kind at the reported
+  index, not on the reported phase.
+- payments/prod's rollback block (auto, previously_carried only) admits a
+  jump to any freight ever carried and ignores an active hold —
+  downgraded by the refuter: the block does what it declares, and the
+  fixture's story is the abort.
+- A decided-but-never-enacted stage never shows drift and `pending`
+  carries no age — downgraded: documented in #44 as the intent/enactment
+  gap living in the status column.
+- The lapsed-approval reason is prose composed in SQL with raw ISO
+  timestamps; the renderer cannot reformat it.
+- The policy's `rule` text is trusted, not re-derived at lint time.
+
+Refuted (kept for the record)
+-----------------------------
+- "ts-vs-seq is used in several latest views" beyond the two demonstrated
+  — the refuter showed lint's monotonic-ts rule makes ts and seq agree
+  except on ties, which the two fixes above cover.
+- "Approval lapse is direction-blind: a forward supersession voids a
+  still-valid approval" — this is the documented rule (#33), deliberately.
+- "v_live announces an in-flight freight as live before any weight" —
+  the documented intent (m_no_weights pins it).

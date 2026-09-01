@@ -24,3 +24,11 @@ what holds now.
   enactments and `carried since`, concurrent legs in `v_inflight`, the
   per-view `--pure-check`, the binding description back on the uptake
   screen, three new mutation checks, smells #30–#32).
+- `2026-09-01-pass-4.txt` — 47 agents over the rollback and canary views
+  (session 4a3b8005): 35 findings, 30 confirmed, 2 downgraded, 3 refuted.
+  One class of escape (ordering by clock where the ledger's order is
+  arrival — the consent and audit floors, direction, reversal, membership)
+  and three unexercised shapes (a rollback of a rollback, a multi-stack
+  stage between legs, a freight one stack ran). Drove the revision commit
+  (seq floors, a reversal that clears, per-stack `v_live`, `v_freight`
+  dedup, two lint rules, five new checks, smells #52–#57).

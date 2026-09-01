@@ -87,7 +87,8 @@ def lint(facts):
     err = lambda i, f, msg: errors.append(f"{f.get('id', '?')} (line {i}): {msg}")
     seen_ids, last_ts = set(), ""
     declared = {"warehouse": set(), "stage": set(), "freight": set(), "edge": set()}
-    transitions = {}  # subject -> {"started": bool, "finished": int}
+    transitions = {}  # subject -> {"started": bool, "finished": int, "stage": str}
+    warehouse_program, stage_program, freight_warehouse, stage_steps = {}, {}, {}, {}
 
     for i, f in enumerate(facts, 1):
         missing = [k for k in ("id", "ts", "class", "kind", "subject", "actor", "payload") if k not in f]
@@ -129,21 +130,33 @@ def lint(facts):
         # Subject bookkeeping: declare before use.
         if kind == "warehouse.declared":
             declared["warehouse"].add(sname)
+            warehouse_program[sname] = p.get("program")
             if not p.get("program") or not p.get("stacks"):
                 err(i, f, "warehouse.declared needs program and stacks (the stacks its freight enacts)")
         elif kind == "stage.declared":
             declared["stage"].add(sname)
+            stage_program[sname] = p.get("program")
+            if isinstance(p.get("strategy"), dict) and p["strategy"].get("steps") is not None:
+                stage_steps[sname] = len(p["strategy"]["steps"])
             if not p.get("program") or not p.get("environment"):
                 err(i, f, "stage.declared needs program and environment")
             up = p.get("upstream", "")
             if up.startswith("warehouse:") and up[10:] not in declared["warehouse"]:
                 err(i, f, f"upstream {up} is not a declared warehouse")
         elif kind == "freight.discovered":
+            if sname in declared["freight"]:
+                err(i, f, "freight discovered twice — a freight is content-keyed and discovered once")
             declared["freight"].add(sname)
+            freight_warehouse[sname] = p.get("warehouse")
             if p.get("warehouse") not in declared["warehouse"]:
                 err(i, f, f"freight.discovered names warehouse {p.get('warehouse')!r}, not a declared warehouse")
         elif kind == "binding.declared":
             declared["edge"].add(subj)
+        elif kind == "rollback.requested":
+            # a nomination is scoped to the stage's own history: its program's warehouse
+            fw = warehouse_program.get(freight_warehouse.get(p.get("freight")))
+            if fw is not None and fw != stage_program.get(sname):
+                err(i, f, f"rollback.requested names {p.get('freight')}, a freight of another program ({fw})")
 
         if stype == "stage" and kind != "stage.declared" and sname not in declared["stage"]:
             err(i, f, f"stage {sname} used before declaration")
@@ -167,14 +180,21 @@ def lint(facts):
             err(i, f, f"transition outcome {p.get('outcome')!r} not in {sorted(TRANSITION_OUTCOMES)}")
 
         if stype == "transition":
-            t = transitions.setdefault(subj, {"started": False, "finished": 0})
+            t = transitions.setdefault(subj, {"started": False, "finished": 0, "stage": None})
             if kind == "transition.started":
                 if t["started"]:
                     err(i, f, "transition started twice")
                 t["started"] = True
+                t["stage"] = p.get("stage")
             else:
                 if not t["started"]:
                     err(i, f, f"{kind} before transition.started")
+                if kind == "transition.phase" and p.get("step") is not None:
+                    n = stage_steps.get(t["stage"])
+                    if n is None:
+                        err(i, f, f"phase cites step {p['step']} but stage {t['stage']} declares no strategy steps")
+                    elif not (0 <= p["step"] < n):
+                        err(i, f, f"phase cites step {p['step']}; stage {t['stage']} declares {n} steps")
                 if kind == "transition.finished":
                     t["finished"] += 1
                     if t["finished"] > 1:
@@ -639,6 +659,8 @@ def screen_trace(db, as_of):
                 where = "nowhere yet"
             if s_["next"]:
                 where += f'<div class="small amber-text">next — {esc(s_["next"])}</div>'
+            if s_["rolled_back_from"]:
+                where += f'<div class="small amber-text"><span class="glyph">↶</span> rolled back from {esc(s_["rolled_back_from"])}</div>'
             if s_["note"]:
                 where += f'<div class="small muted">{esc(s_["note"])}</div>'
             row = [line, where]
@@ -979,7 +1001,8 @@ def screen_releases(db, as_of):
                 cell = lane_cell(c, as_of)
                 if c["approvable"]:
                     cell = (f'<div class="small">approved by {esc(c["approved_by"])} · {esc(fmt_ts(c["approved_at"]))}</div>' if c["approved_at"]
-                            else '<div class="small muted">no approval</div>') + cell
+                            else (f'<div class="small muted">approval of {esc(fmt_ts(c["lapsed_approval_at"]))} lapsed</div>' if c["lapsed_approval_at"]
+                                  else '<div class="small muted">no approval</div>')) + cell
                 row.append(cell)
             rows.append(row)
         if rows:

@@ -372,9 +372,11 @@ screen still a SELECT over `facts`. What it cost the views, honestly:
 38. **The lookback is a term that reads the clock.** `previously_carried
     {within_hours: 120}` is `prod-rollback`'s task-definition window as a
     gate term; after `not_held` it is the second term whose answer depends
-    on `now`, and the gate's answer for F416 at production changes on Aug
-    23 with no new fact. Time-dependent terms are the reason the clock is
-    an input (#1) and the reason "as of T" is only half-expressible (#15).
+    on `now`: while F417 is production's rollback candidate on Thursday,
+    the term is satisfied until Fri Aug 29 16:31 (120h after production
+    last carried it) and unmet a second later, with no new fact.
+    Time-dependent terms are the reason the clock is an input (#1) and
+    the reason "as of T" is only half-expressible (#15).
 
 39. **Passing through is history; reversal is not.** The first lanes
     version marked every freight the stage had moved off as withdrawn,
@@ -440,7 +442,7 @@ it settled:
     and an analysis from before the rollout does not count. This is the
     "transitions as the blue/green primitive" position with something under
     it: the executor pauses on an observation (`phase: paused, step: 1`)
-    and the ledger says what would let it continue. Two terms of six are
+    and the ledger says what would let it continue. Three terms of six are
     defined on a step (`verified`, `approved`, `not_held`); the rest name
     stages, freight or plans a step has no business with — OPEN 4's terms
     are typed by subject three ways now (stage, edge, step).
@@ -498,3 +500,61 @@ it settled:
     members then move under their own rollback blocks. Cheap, but this
     week's story had no reason to unpin k8s 1.31; left for a fixture that
     does.
+
+## 2026-09-01 — verification pass 4 (rollback and canary views)
+
+47 agents over the new mechanisms only (`verification/2026-09-01-pass-4.txt`):
+35 findings, 30 confirmed. The escapes were all one class — ordering by
+clock where the ledger's order is arrival — plus three shapes the fixtures
+had not exercised (a rollback of a rollback, a multi-stack stage between
+legs, a freight one stack ran). Fixed in the revision; what stays as record:
+
+52. **"After" is by arrival, everywhere, including the floors.** The
+    consent floor (#33) compared `ts >= moved_at`; an approval that shared
+    the reversal's second but arrived before it revived consent, and both
+    the rolled-back F418 and the aborted A232 read `ready`. The audit's
+    as-of floor had the mirror hole. Every "latest" view here already
+    dedups by `seq` (#12); the new floors now do too (`moved_seq`,
+    `started_seq`), and direction, reversal and membership order freights
+    by `(discovered_at, seq)`. The lesson is #12 restated for relations:
+    any comparison between two facts is by arrival, and `ts` is for
+    display and for the clock-relative terms only.
+
+53. **A reversal is current only until intent returns.** `v_reversal`
+    held for F418 after a mutation re-decided it, so lanes said rolled
+    back while the grid — which derived the same thing inline — said
+    pending. The view now requires that no later decision returned to the
+    freight, and the grid reads it too; #39's "one derivation" is true
+    now, not merely claimed.
+
+54. **Per-stack is the grain of "live", as it was of "carried" (#4, #30).**
+    On platform/prod between legs `v_carried` is NULL, so the first
+    `v_live` emitted nothing and a read of the true per-stack state was
+    drift on every service. `v_live` is per stack now: a stable row per
+    distinct carried-stack freight, a canary row per distinct open-leg
+    freight. `previously_carried` had the mirror defect (satisfied by a
+    freight one stack ran) and now requires every stack. The stack keeps
+    not being a subject (#30) and keeps costing a view each time.
+
+55. **An enactment's claim about its step is unchecked, and a
+    re-declaration re-interprets it.** A phase citing a step past the
+    declared steps silently dropped the step gate (now a lint error); a
+    stage re-declared mid-rollout evaluates the executor's step index
+    against the new declaration, since the transition does not cite the
+    declaration it started under. Same family as #31: the transition
+    should ref the `stage.declared` it enacts. Recorded, not fixed.
+
+56. **The rollback block is whatever the team declares.** payments/prod's
+    (`auto`, `previously_carried`) admits a jump to any freight prod ever
+    ran and ignores a hold, because that is all it says; the fixture's
+    story is the abort, and the block is minimal for it. The refuter
+    downgraded the finding to "as declared". The real point for OPEN 4:
+    a rollback block with no `not_held` is probably a lint warning, not a
+    choice.
+
+57. **Prose composed in SQL cannot be reformatted.** The lapsed-approval
+    reason carries raw ISO timestamps into the page because the sentence
+    is built in `v_gate_term`; the renderer formats every other time.
+    The honest split is structured columns (which approval, which
+    decision) and a sentence built in the renderer — deferred, since the
+    checks pin the sentence.

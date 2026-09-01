@@ -161,6 +161,17 @@ def self_checks(check, H, facts):
     check("as of Tue 13:00: platform/prod × P12 waits only on platform-oncall — both staging verifications count after the retried cluster leg", "2026-09-01T13:00:00Z",
           lambda db: (lambda r: r["status"] == "awaiting" and r["awaiting"] == "approval: platform-oncall" and r["candidate"] == "P12")(grid(db, "platform/prod")))
 
+    check("as of Tue 14:21:15 (platform/prod between legs): the live set is per stack — P12 on network, P11 on cluster — so a read of that state is not drift", "2026-09-01T14:21:15Z",
+          lambda db: sorted((r["freight"], r["role"]) for r in q(db, "SELECT freight, role FROM v_live WHERE stage='platform/prod'")) == [("P11", "stable"), ("P12", "stable")]
+          and grid(db, "platform/prod")["live"] == "P11 stable 100% | P12 stable 100%")
+
+    def m_observe_between_legs(fs):
+        fs.append({"id": "m030", "ts": "2026-09-01T14:21:10Z", "class": "observation", "kind": "state.observed", "subject": "stage:platform/prod",
+                   "actor": "watch:conformance", "payload": {"services": {"network": "P12", "cluster": "P11"}, "source": "stack tags"}})
+    check("mutation: a conformance read between legs matches the per-stack live set — partial is not drift", "2026-09-01T14:21:15Z",
+          lambda db: one(db, "SELECT mismatches FROM v_observed WHERE stage='platform/prod'")["mismatches"] == 0
+          and grid(db, "platform/prod")["status"] == "partial" and grid(db, "platform/prod")["drift"] is None, m_observe_between_legs)
+
     # --- the canary: both live inside the pause, then the abort ---------------------
     K1 = "2026-09-02T11:20:00Z"
     check("as of Wed 11:20: payments/prod is in flight, paused on step 2 of 3 with the step gate awaiting the analysis; carried is still A231", K1,

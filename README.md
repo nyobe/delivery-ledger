@@ -35,8 +35,8 @@ each layer is computed once from the one below instead of being re-derived
 inside every correlated subquery above it — a full run of either scenario
 takes well under a second. `--pure-check` builds both ways at the primary
 instant and compares every view's rows as sets (order is not compared —
-an unordered view is legitimately unordered): on both scenarios 61 views
-return the same rows, and the one pure mode cannot evaluate —
+an unordered view is legitimately unordered): on both scenarios every view
+but one returns the same rows (72 of 73 at the time of writing), and the one pure mode cannot evaluate —
 `v_trace_summary`, which nests deeply enough once inlined to exceed SQLite's
 limit on table references per statement — is reported as such rather than
 counted as agreement. That is the check that nothing depends on the materialisation,
@@ -248,9 +248,9 @@ so rather than passing them.
   `awaiting`/`drifted`/`converged`/`held`/`superseded` values anywhere;
 - every policy-written promotion decision passed its gate at the instant it
   was written (the ledger rebuilt at each decision's own timestamp);
-- the scenario's self-checks pass (85 for pulumi-service, 78 for
+- the scenario's self-checks pass (88 for pulumi-service, 80 for
   multistack), each pinning something a view must *include and exclude* at
-  one instant — and eighteen (twenty) of them are **mutation checks**. For
+  one instant — and twenty-one (twenty-one) of them are **mutation checks**. For
   pulumi-service: the fixture is altered in memory (a verification moved before
   its deployment; a verification for a freight the stage never carried; an
   approval by the wrong role; a decision written by a person; an approval
@@ -262,18 +262,23 @@ so rather than passing them.
   reversal; EU's fresh plan deleted so only Monday's plan and approval
   remain; the request re-pointed at F416, outside the lookback; the
   rollback decision typed by a person; the migration removed from the
-  backward plan; the request removed) and the views must say so. For
+  backward plan; the request removed; a hold on production during the
+  request; an approval sharing the reversal's second but arriving before
+  it; F418 re-approved and re-decided after the rollback, so the reversal
+  clears) and the views must say so. For
   multistack: a staging verification
   recorded between the network leg and the retried cluster leg; an uptake
   with its approval deleted, or written by a person, or approved by the
   wrong role; a preview flipped to safe; a hold on the consumer stage; the
-  within-team auto uptake removed; the prod cluster leg left open; the pin
-  removed from every freight; a payments build attributed to the platform
-  warehouse; and for the canary — a passing analysis and a promote after
+  within-team auto uptake removed; the prod cluster leg left open; both
+  legs left open; a record uptake as the only enactment; a `verified` term
+  declared on an edge; the pin removed from every freight; a payments
+  build attributed to the platform warehouse; and for the canary — a passing analysis and a promote after
   the rollout started (the step gate opens); an analysis from before it
   started (it does not); the canary observed running a third freight; the
   weights dropped from the phase facts; prod's rollback block removed; the
-  abort's evidence removed; a fresh approval after the abort. A SELECT
+  abort's evidence removed; a fresh approval after the abort; a
+  conformance read of platform/prod between legs. A SELECT
   cannot stay green with its mechanism broken.
 
 The scenario keeps one figure in one place: the timeline in `fixture.py`

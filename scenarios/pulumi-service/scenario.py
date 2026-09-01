@@ -394,3 +394,31 @@ def self_checks(check, H, facts):
           and one(db, "SELECT direction FROM v_gate WHERE stage='production' AND freight='F417'")["direction"] == "rollback",
           m_no_request)
 
+    def m_hold_during_request(fs):
+        fs.append({"id": "m011", "ts": "2026-08-27T10:55:00Z", "class": "intent", "kind": "hold.placed", "subject": "stage:production",
+                   "actor": "user:sam", "payload": {"until": "2026-08-27T14:00:00Z", "scope": "promotions"}, "rationale": "customer demo in progress"})
+    check("mutation: a hold on production blocks the rollback too — the rollback block's not_held term is the blocker", R1,
+          lambda db: (lambda r: r["status"] == "held" and r["awaiting_type"] == "not_held" and r["candidate"] == "F417")(grid(db, "production")),
+          m_hold_during_request)
+
+    def m_rollback_of_rollback(fs):
+        fs.append({"id": "m013", "ts": "2026-08-27T12:00:00Z", "class": "intent", "kind": "approval.granted", "subject": "stage:production",
+                   "actor": "user:maya", "payload": {"freight": "F418", "role": "oncall", "via": "console"}, "rationale": "INC-2318 mitigated by config"})
+        fs.append({"id": "m014", "ts": "2026-08-27T12:00:05Z", "class": "intent", "kind": "promotion.decided", "subject": "stage:production",
+                   "actor": "policy:production", "payload": {"freight": "F418"}, "rationale": "gate satisfied: re-approved", "refs": ["m013"]})
+    check("mutation: once intent returns to F418 the reversal is history — no lane, trace or grid cell says rolled back; F417 is not a reversal either (forward move)", R2,
+          lambda db: q(db, "SELECT * FROM v_reversal WHERE stage='production'") == []
+          and one(db, "SELECT cell FROM v_lanes WHERE freight='F418' AND stage='production'")["cell"] == "reached"
+          and one(db, "SELECT cell FROM v_trace_cell WHERE pr=46173 AND stage='production'")["cell"] == "reached"
+          and (lambda r: r["rolled_back_from"] is None and r["status"] == "pending" and r["desired"] == "F418")(grid(db, "production")),
+          m_rollback_of_rollback)
+
+    def m_same_second_approval(fs):
+        # an approval for F418 that shares the reversal's second but arrives before it: not after, by arrival
+        d = find(fs, kind="promotion.decided", subject="stage:production", p_freight="F417", ts="2026-08-27T11:05:05Z")
+        fs.insert(fs.index(d), {"id": "m012", "ts": "2026-08-27T11:05:05Z", "class": "intent", "kind": "approval.granted", "subject": "stage:production",
+                                "actor": "user:sam", "payload": {"freight": "F418", "role": "oncall", "via": "console"}, "rationale": "keep F418"})
+    check("mutation: an approval in the reversal's own second that arrived before it does not survive it — 'after' is by arrival", R2,
+          lambda db: grid(db, "production")["status"] == "awaiting" and grid(db, "production")["awaiting_type"] == "approved"
+          and one(db, "SELECT valid FROM v_approval WHERE fact='m012'")["valid"] == 0, m_same_second_approval)
+

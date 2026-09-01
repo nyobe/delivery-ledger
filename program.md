@@ -43,9 +43,9 @@ export default d.program("pulumi-service", {
                                             d.verified("staging", "load-generator"),
                                             d.approved({ role: "oncall", via: d.releasePrMerge() })],
                                }),
-                               // A promotion to a freight older than what the stage carries is gated
-                               // here instead: cmd/prod-rollback's checks, as terms. No block → the
-                               // ordinary terms apply in both directions.
+                               // A promotion to a freight older than the one the stage is decided to
+                               // is gated here instead: cmd/prod-rollback's checks, as terms. No
+                               // block → the ordinary terms apply in both directions.
                                rollback: d.autoIfSafe({
                                  requires: [d.carriedBefore({ within: "120h" }), d.notHeld()],
                                  safe:     d.plan(p => !p.migrationsChanged),
@@ -98,7 +98,9 @@ are the vocabulary a gate language needs first.
 
 `rollback:` is the same shape under a second key. Which set a (stage,
 freight) pair is evaluated against is not declared anywhere: the freight is
-older than what the stage carries, or it is not (`v_direction`). Nothing
+older than the one the stage is currently decided to, or it is not
+(`v_direction` — relative to intent, so that an abort back to the stable
+while a canary is in flight is a rollback too). Nothing
 about a decision says "rollback"; the audit derives the direction the
 decision had at the instant it was written from the same two facts.
 
