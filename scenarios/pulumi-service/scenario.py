@@ -18,13 +18,15 @@ PAGE = {
                "parallel), plus two worker-pool bindings. Generated from a timeline (<code>fixture.py</code>); the views are real."),
 }
 
-DEFAULT_AS_OF = "2026-08-26T17:45:00Z"
+DEFAULT_AS_OF = "2026-08-27T12:30:00Z"
 SNAPSHOTS = [
     # (as_of, caption) — the primary first; the rest are the time-travel tabs.
     # The captions are hand-authored page chrome, the one place this file
     # names freights and stages outside the self-checks; every claim in them
     # is pinned by a self-check at the same instant.
-    (DEFAULT_AS_OF,           "Wed 17:45 — F418 waiting on oncall; production drifted since Monday night"),
+    (DEFAULT_AS_OF,           "Thu 12:30 — production rolled back to F417 by the front door; F418 needs re-approval; EU awaiting oncall to follow"),
+    ("2026-08-27T11:00:00Z",  "Thu 11:00 — rollback to F417 requested (INC-2318); the backward diff-gate finds a migration and waits for oncall"),
+    ("2026-08-26T17:45:00Z",  "Wed 17:45 — F418 waiting on oncall; production drifted since Monday night"),
     ("2026-08-24T16:20:00Z",  "Mon 16:20 — F417 mid-rollout to production, both versions live"),
     ("2026-08-24T16:50:00Z",  "Mon 16:50 — production-eu holds F417 for approval: the plan touches a migration"),
     ("2026-08-26T16:15:00Z",  "Wed 16:15 — F419 failed in testing-eu, still rolling in testing"),
@@ -42,8 +44,8 @@ def self_checks(check, H, facts):
     """
     q, one, grid, find = H.q, H.one, H.grid, H.find
 
-    A = DEFAULT_AS_OF
-    # --- the primary instant ------------------------------------------------
+    A = "2026-08-26T17:45:00Z"
+    # --- Wednesday afternoon: the release train as it stood before Thursday -------
     check("grid: production awaiting oncall approval (candidate F418, desired F417), since the last verification", A,
           lambda db: (lambda r: r["status"] == "awaiting" and r["awaiting"] == "approval: oncall"
                       and r["candidate"] == "F418" and r["desired"] == "F417"
@@ -69,8 +71,9 @@ def self_checks(check, H, facts):
           and one(db, "SELECT last_outcome FROM v_lanes WHERE freight='F419' AND stage='testing-eu'")["last_outcome"] == "failed")
     check("lanes: F417 is awaiting nowhere (it is desired everywhere it sits)", A,
           lambda db: q(db, "SELECT * FROM v_lanes WHERE freight='F417' AND awaiting IS NOT NULL") == [])
-    check("gate terms: production-eu × F416 safe by plan; × F417 by the EU approval; × F418 waits on production first", A,
-          lambda db: one(db, "SELECT evidence FROM v_gate_term WHERE stage='production-eu' AND freight='F416' AND type='plan_safe_or_approved'")["evidence"].endswith("— safe")
+    check("gate terms: production-eu × F416's Aug-18 plan is stale (EU has carried F417 since); × F417 by the EU approval; × F418 waits on production first", A,
+          lambda db: (lambda r: r["satisfied_at"] is None and r["evidence"].endswith("— safe (stale)") and r["unmet_text"].startswith("plan for production-eu (the plan at 2026-08-18T16:47:00Z predates"))
+          (one(db, "SELECT * FROM v_gate_term WHERE stage='production-eu' AND freight='F416' AND type='plan_safe_or_approved'"))
           and one(db, "SELECT evidence_fact FROM v_gate_term WHERE stage='production-eu' AND freight='F417' AND type='plan_safe_or_approved'")["evidence_fact"]
               == one(db, "SELECT fact FROM v_approval WHERE stage='production-eu' AND freight='F417'")["fact"]
           and (lambda r: r["passes"] == 0 and r["awaiting"] == "production to carry F418")
@@ -87,9 +90,11 @@ def self_checks(check, H, facts):
           lambda db: one(db, "SELECT passes FROM v_gate WHERE stage='production-eu' AND freight='F416'")["passes"] == 1
           and one(db, "SELECT evidence_fact FROM v_gate_term WHERE stage='production-eu' AND freight='F416' AND type='plan_safe_or_approved'")["evidence_fact"]
               == one(db, "SELECT fact FROM v_plan WHERE stage='production-eu' AND freight='F416'")["fact"])
-    check("gate: an approval on production does not count for production-eu", A,
-          lambda db: one(db, "SELECT satisfied_at FROM v_gate_term WHERE stage='production-eu' AND freight='F416' AND type='plan_safe_or_approved'")["satisfied_at"]
-          == one(db, "SELECT ts FROM v_plan WHERE stage='production-eu' AND freight='F416'")["ts"])
+    check("gate: an approval on production does not count for production-eu (F416's EU term cites only its own stale plan)", A,
+          lambda db: (lambda r: r["satisfied_at"] is None and r["term_outcome"] == "stale"
+                      and r["evidence_fact"] == one(db, "SELECT fact FROM v_plan WHERE stage='production-eu' AND freight='F416'")["fact"]
+                      and r["evidence_fact"] != one(db, "SELECT fact FROM v_approval WHERE stage='production' AND freight='F416'")["fact"])
+          (one(db, "SELECT * FROM v_gate_term WHERE stage='production-eu' AND freight='F416' AND type='plan_safe_or_approved'")))
     check("gate: passes is never NULL", A,
           lambda db: q(db, "SELECT * FROM v_gate WHERE passes IS NULL") == [])
     check("uptake: AMI edge pending in US (v13 > v12), not in EU (v9 == v9); image edge auto-taken by policy (v72)", A,
@@ -125,13 +130,88 @@ def self_checks(check, H, facts):
           and one(db, "SELECT cell FROM v_lanes WHERE freight='F419' AND stage='testing-eu'")["cell"] == "failed"
           and one(db, "SELECT cell FROM v_lanes WHERE freight='F418' AND stage='production'")["cell"] == "awaiting"
           and one(db, "SELECT cell FROM v_trace_cell WHERE pr=46181 AND stage='testing'")["cell"] == "reached")
-    check("diff-gate: term outcomes are view-computed (F416 auto, F417 approved, F418 open, F420 no-plan)", A,
+    check("diff-gate: term outcomes are view-computed (F416 stale, F417 approved, F418 open, F420 no-plan)", A,
           lambda db: {r["freight"]: r["term_outcome"] for r in q(db, "SELECT freight, term_outcome FROM v_gate_term WHERE stage='production-eu' AND type='plan_safe_or_approved'")}
-          == {"F416": "auto", "F417": "approved", "F418": "open", "F419": "no-plan", "F420": "no-plan"})
+          == {"F416": "stale", "F417": "approved", "F418": "open", "F419": "no-plan", "F420": "no-plan"})
+    check("as of Aug 24 15:00 (before F417 landed anywhere): production-eu × F416's plan is still current and safe — auto", "2026-08-24T15:00:00Z",
+          lambda db: one(db, "SELECT term_outcome FROM v_gate_term WHERE stage='production-eu' AND freight='F416' AND type='plan_safe_or_approved'")["term_outcome"] == "auto")
     check("audit: no decision in the fixture is flagged; production-eu's two decisions have their approval-bearing term met", A,
           lambda db: q(db, "SELECT * FROM v_audit_flag WHERE flag IS NOT NULL") == []
           and [r["n_unmet"] for r in q(db, "SELECT n_unmet FROM v_audit_decision WHERE stage='production-eu' ORDER BY ts")] == [0, 0]
           and one(db, "SELECT n_required FROM v_audit_decision WHERE stage='production-eu' AND freight='F416'")["n_required"] == 1)
+
+    # --- Thursday: F418 ships, then the front-door rollback ----------------------
+    R0 = "2026-08-27T09:36:00Z"
+    check("as of Thu 09:36: F418 carried by production; the api break-glass expired with the promotion and nothing drifts", R0,
+          lambda db: (lambda r: r["status"] == "converged" and r["carried"] == "F418" and r["drift"] is None)(grid(db, "production")))
+    R1 = "2026-08-27T11:00:00Z"
+    check("as of Thu 11:00: production's candidate is F417 by rollback request, in the rollback direction; the backward plan's migration puts it on oncall", R1,
+          lambda db: (lambda r: r["status"] == "awaiting" and r["candidate"] == "F417" and r["candidate_direction"] == "rollback"
+                      and r["candidate_source"] == "rollback request" and r["requested_by"] == "user:maya" and r["request_incident"] == "INC-2318"
+                      and r["desired"] == "F418" and r["carried"] == "F418"
+                      and r["awaiting"].startswith("approval: oncall (plan not safe)") and r["awaiting_since"] == "2026-08-27T10:53:00Z")
+          (grid(db, "production")))
+    check("as of Thu 11:00: the rollback gate reads its own terms — F417 carried within 120h; F416 last carried Aug 18, outside the window, with a stale plan", R1,
+          lambda db: (lambda r: r["satisfied_at"] == "2026-08-24T16:31:00Z")(one(db, "SELECT * FROM v_gate_term WHERE stage='production' AND freight='F417' AND type='previously_carried'"))
+          and (lambda r: r["satisfied_at"] is None and r["unmet_text"] == "production last carried F416 at 2026-08-18T16:34:00Z, outside 120h")
+          (one(db, "SELECT * FROM v_gate_term WHERE stage='production' AND freight='F416' AND type='previously_carried'"))
+          and one(db, "SELECT term_outcome FROM v_gate_term WHERE stage='production' AND freight='F416' AND type='plan_safe_or_approved'")["term_outcome"] == "stale"
+          and one(db, "SELECT mode FROM v_gate WHERE stage='production' AND freight='F417'")["mode"] == "auto-if-safe"
+          and one(db, "SELECT mode FROM v_gate WHERE stage='production' AND freight='F418'")["mode"] == "gated")
+    check("as of Thu 11:00: F417's Monday approval does not carry — intent moved off F417 when F418 was decided", R1,
+          lambda db: (lambda r: r["term_outcome"] == "open" and "predates the decision that moved production off F417" in r["unmet_text"])
+          (one(db, "SELECT * FROM v_gate_term WHERE stage='production' AND freight='F417' AND type='plan_safe_or_approved'"))
+          and one(db, "SELECT valid FROM v_approval WHERE stage='production' AND freight='F417' AND ts='2026-08-24T16:05:00Z'")["valid"] == 0)
+    check("as of Thu 11:00: lanes — F417 still reads reached at production (passing forward is history), F418 is current", R1,
+          lambda db: one(db, "SELECT cell FROM v_lanes WHERE freight='F417' AND stage='production'")["cell"] == "reached"
+          and one(db, "SELECT is_current FROM v_lanes WHERE freight='F418' AND stage='production'")["is_current"] == 1)
+    R2 = DEFAULT_AS_OF
+    check("grid: production carries F417 again, rolled back from F418; the engine's last enactment is still F418 (no Pulumi update ran)", R2,
+          lambda db: (lambda r: r["desired"] == "F417" and r["carried"] == "F417" and r["carried_since"] == "2026-08-27T11:14:00Z"
+                      and r["rolled_back_from"] == "F418" and r["rolled_back_at"] == "2026-08-27T11:05:05Z"
+                      and r["engine_freight"] == "F418" and r["engine_update"] == 3199 and r["ops_update"] is None and r["drift"] is None)
+          (grid(db, "production")))
+    check("grid: after the rollback F418 is production's candidate again and its standing approval no longer counts — awaiting re-approval since the reversal", R2,
+          lambda db: (lambda r: r["status"] == "awaiting" and r["candidate"] == "F418" and r["candidate_direction"] == "forward"
+                      and r["candidate_source"] == "upstream" and r["awaiting_type"] == "approved"
+                      and "predates the decision that moved production off F418" in r["awaiting"]
+                      and r["awaiting_since"] == "2026-08-27T11:05:05Z")
+          (grid(db, "production")))
+    check("grid: production-eu follows production into the rollback direction under its ordinary terms; Monday's plan and approval are stale, the fresh plan is not safe", R2,
+          lambda db: (lambda r: r["status"] == "awaiting" and r["candidate"] == "F417" and r["candidate_direction"] == "rollback"
+                      and r["candidate_source"] == "upstream" and r["carried"] == "F418" and r["rolled_back_from"] is None
+                      and r["awaiting"].startswith("approval: oncall (plan not safe)") and r["awaiting_since"] == "2026-08-27T11:30:00Z")
+          (grid(db, "production-eu"))
+          and one(db, "SELECT mode FROM v_gate WHERE stage='production-eu' AND freight='F417'")["mode"] == "auto-if-safe"
+          and one(db, "SELECT current FROM v_plan WHERE stage='production-eu' AND freight='F417'")["current"] == 1
+          and one(db, "SELECT ts FROM v_plan WHERE stage='production-eu' AND freight='F417'")["ts"] == "2026-08-27T11:30:00Z")
+    check("lanes: F418 rolled back at production (to F417, with the re-approval it waits on); F417 reached Aug 24 and again Thu 11:14; F416 passed through, not rolled back", R2,
+          lambda db: (lambda r: r["cell"] == "rolled-back" and r["rolled_back_to"] == "F417" and r["rolled_back_at"] == "2026-08-27T11:05:05Z"
+                      and r["reached_at"] == "2026-08-27T09:20:00Z" and r["awaiting"] is not None)
+          (one(db, "SELECT * FROM v_lanes WHERE freight='F418' AND stage='production'"))
+          and (lambda r: r["cell"] == "reached" and r["is_current"] == 1 and r["reached_at"] == "2026-08-24T16:31:00Z" and r["current_since"] == "2026-08-27T11:14:00Z")
+          (one(db, "SELECT * FROM v_lanes WHERE freight='F417' AND stage='production'"))
+          and (lambda r: r["cell"] == "reached" and r["rolled_back_at"] is None)(one(db, "SELECT * FROM v_lanes WHERE freight='F416' AND stage='production'"))
+          and one(db, "SELECT cell FROM v_lanes WHERE freight='F418' AND stage='production-eu'")["cell"] == "reached")
+    check("trace: #46173 (the INC-2311 fix) was rolled back from production and is still in production-eu; #46120 (in F417) is current in production", R2,
+          lambda db: (lambda r: r["furthest_stage"] == "production-eu" and r["rolled_back_from"] == "production (2026-08-27T11:05:05Z, to F417)")
+          (one(db, "SELECT * FROM v_trace_summary WHERE pr=46173"))
+          and one(db, "SELECT cell FROM v_trace_cell WHERE pr=46173 AND stage='production'")["cell"] == "rolled-back"
+          and one(db, "SELECT is_current FROM v_trace_cell WHERE pr=46173 AND stage='production-eu'")["is_current"] == 1
+          and one(db, "SELECT rolled_back_from FROM v_trace_summary WHERE pr=46120")["rolled_back_from"] is None
+          and one(db, "SELECT is_current FROM v_trace_cell WHERE pr=46120 AND stage='production'")["is_current"] == 1)
+    check("releases: F418's production cell is rolled back; F417's card shows the fresh Thursday approval", R2,
+          lambda db: one(db, "SELECT cell FROM v_release_stage WHERE freight='F418' AND stage='production'")["cell"] == "rolled-back"
+          and one(db, "SELECT approved_at FROM v_release_stage WHERE freight='F417' AND stage='production'")["approved_at"] == "2026-08-27T11:05:00Z")
+    check("audit: the rollback decision is a policy decision in the rollback direction, from incumbent F418, with its approval-bearing term met; nothing flagged", R2,
+          lambda db: q(db, "SELECT * FROM v_audit_flag WHERE flag IS NOT NULL") == []
+          and (lambda r: r["direction"] == "rollback" and r["incumbent"] == "F418" and r["mode"] == "auto-if-safe" and r["n_required"] == 1 and r["n_unmet"] == 0)
+          (one(db, "SELECT * FROM v_audit_flag WHERE stage='production' AND freight='F417' AND ts='2026-08-27T11:05:05Z'")))
+    check("transition: the rollback enactment ran no Pulumi update and cites the rollback decision", R2,
+          lambda db: (lambda r: r["ops_update"] is None and r["outcome"] == "succeeded" and r["resource_steps"] == 5 and r["strategy"].startswith("ecs UpdateService"))
+          (one(db, "SELECT * FROM v_transition WHERE transition='transition:F417-prod-rollback'")))
+    check("observed: production matches intent after the rollback — the only drift signal is the engine's last enactment", R2,
+          lambda db: one(db, "SELECT mismatches FROM v_observed WHERE stage='production'")["mismatches"] == 0)
 
     # --- time travel ----------------------------------------------------------
     B = "2026-08-24T16:20:00Z"
@@ -250,4 +330,63 @@ def self_checks(check, H, facts):
         find(fs, kind="verification.recorded", subject="stage:staging", p_freight="F418", p_check="integration-tests")["payload"]["outcome"] = "fail"
     check("mutation: a failed staging verification moves production's blocker from approval to verification", A,
           lambda db: grid(db, "production")["awaiting"] == "verification: integration-tests in staging", m_failed_verification)
+
+    # --- rollback mutations ------------------------------------------------------
+    def m_no_rollback_approval(fs):
+        a = find(fs, kind="approval.granted", subject="stage:production", p_freight="F417", ts="2026-08-27T11:05:00Z")
+        d = find(fs, kind="promotion.decided", subject="stage:production", p_freight="F417", ts="2026-08-27T11:05:05Z")
+        d["refs"] = [r for r in d.get("refs", []) if r != a["id"]]
+        fs.remove(a)
+    check("mutation: without Thursday's confirmation, the Monday approval does not wave the rollback through — the gate stays open and the audit flags the decision", R2,
+          lambda db: one(db, "SELECT passes FROM v_gate WHERE stage='production' AND freight='F417'")["passes"] == 0
+          and (lambda r: r["flag"] == "unmet at decision time: safe plan or approval: oncall")
+          (one(db, "SELECT * FROM v_audit_flag WHERE stage='production' AND freight='F417' AND ts='2026-08-27T11:05:05Z'")),
+          m_no_rollback_approval)
+
+    def m_fresh_reapproval(fs):
+        fs.append({"id": "m010", "ts": "2026-08-27T12:00:00Z", "class": "intent", "kind": "approval.granted", "subject": "stage:production",
+                   "actor": "user:sam", "payload": {"freight": "F418", "role": "oncall", "via": "console"}, "rationale": "INC-2318 mitigated by config; ship F418 again"})
+    check("mutation: a fresh approval for F418 after the reversal counts — production reads ready (the floor is a time, not a ban)", R2,
+          lambda db: grid(db, "production")["status"] == "ready" and grid(db, "production")["candidate"] == "F418", m_fresh_reapproval)
+
+    def m_eu_no_fresh_plan(fs):
+        fs.remove(find(fs, kind="plan.summarized", subject="stage:production-eu", p_freight="F417", ts="2026-08-27T11:30:00Z"))
+    check("mutation: without a fresh EU plan, Monday's plan and approval do not let production-eu auto-follow the rollback — it waits for a plan", R2,
+          lambda db: (lambda r: r["status"] == "awaiting" and r["passes"] == 0 and r["awaiting_type"] == "plan_safe_or_approved"
+                      and r["awaiting"].startswith("plan for production-eu (the plan at 2026-08-24T16:45:00Z predates"))
+          (grid(db, "production-eu")), m_eu_no_fresh_plan)
+
+    def m_request_f416(fs):
+        find(fs, kind="rollback.requested", subject="stage:production")["payload"]["freight"] = "F416"
+    check("mutation: a request for F416 fails the lookback term — production last carried it Aug 18, outside 120h", R1,
+          lambda db: (lambda r: r["candidate"] == "F416" and r["awaiting_type"] == "previously_carried"
+                      and r["awaiting"] == "production last carried F416 at 2026-08-18T16:34:00Z, outside 120h")
+          (grid(db, "production")), m_request_f416)
+
+    def m_person_rolls_back(fs):
+        find(fs, kind="promotion.decided", subject="stage:production", p_freight="F417", ts="2026-08-27T11:05:05Z")["actor"] = "user:maya"
+    check("mutation: a rollback decision typed by a person is recorded as intent and flagged by the audit — today's prod-rollback, faithfully", R2,
+          lambda db: grid(db, "production")["desired"] == "F417"
+          and one(db, "SELECT flag FROM v_audit_flag WHERE stage='production' AND freight='F417' AND ts='2026-08-27T11:05:05Z'")["flag"].startswith("decided by user:maya directly"),
+          m_person_rolls_back)
+
+    def m_no_migration(fs):
+        p = find(fs, kind="plan.summarized", subject="stage:production", p_freight="F417", ts="2026-08-27T10:53:00Z")
+        p["payload"]["migrations_changed"] = False
+        p["payload"].pop("migrations", None)
+    check("mutation: with no migration between F417 and F418 the rollback is auto-safe — the gate passes with no approval at 11:00", R1,
+          lambda db: (lambda r: r["status"] == "ready" and r["candidate"] == "F417")(grid(db, "production"))
+          and one(db, "SELECT term_outcome FROM v_gate_term WHERE stage='production' AND freight='F417' AND type='plan_safe_or_approved'")["term_outcome"] == "auto",
+          m_no_migration)
+
+    def m_no_request(fs):
+        rq = find(fs, kind="rollback.requested", subject="stage:production")
+        for f in fs:
+            if rq["id"] in f.get("refs", []):
+                f["refs"] = [r for r in f["refs"] if r != rq["id"]]
+        fs.remove(rq)
+    check("mutation: without the request nothing nominates F417 — production's candidate stays F418 at 11:00, though the rollback gate for F417 still evaluates at rest", R1,
+          lambda db: grid(db, "production")["candidate"] == "F418"
+          and one(db, "SELECT direction FROM v_gate WHERE stage='production' AND freight='F417'")["direction"] == "rollback",
+          m_no_request)
 

@@ -31,7 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 INTENT_KINDS = {
     "warehouse.declared", "stage.declared", "policy.declared", "binding.declared", "release.cut",
     "release.pinned", "promotion.decided", "approval.granted", "hold.placed", "breakglass.recorded",
-    "uptake.decided",
+    "uptake.decided", "rollback.requested",
 }
 OBSERVATION_KINDS = {
     "freight.discovered", "transition.started", "transition.phase", "transition.finished",
@@ -40,7 +40,7 @@ OBSERVATION_KINDS = {
 }
 RATIONALE_REQUIRED = {
     "release.cut", "release.pinned", "promotion.decided", "approval.granted", "hold.placed",
-    "breakglass.recorded", "uptake.decided",
+    "breakglass.recorded", "uptake.decided", "rollback.requested",
 }
 SUBJECT_TYPES = {"warehouse", "stage", "freight", "transition", "edge", "record", "release"}
 TRANSITION_OUTCOMES = {"succeeded", "failed", "abandoned"}
@@ -48,7 +48,8 @@ PLAN_KEYS = {"create", "update", "delete", "replace", "migrations_changed"}
 # Derived states must never be written down. If a fact carries one of these,
 # the demo is storing what it claims to compute.
 FORBIDDEN_KEYS = {"status", "state"}
-FORBIDDEN_VALUES = {"awaiting", "drifted", "converged", "held", "pending", "ready", "in-flight", "superseded", "idle", "partial"}
+FORBIDDEN_VALUES = {"awaiting", "drifted", "converged", "held", "pending", "ready", "in-flight", "superseded", "idle", "partial",
+                    "rolled-back", "rollback", "forward", "stale", "withdrawn", "aborted"}
 
 
 
@@ -381,7 +382,7 @@ GLYPH = {
     "converged": ("●", "ok"), "awaiting": ("○", "amber"), "held": ("⊘", "hold"),
     "in-flight": ("◌", "live"), "failed": ("✕", "bad"), "ready": ("▸", "ok"),
     "pending": ("○", "hold"), "superseded": ("↷", "live"), "idle": ("·", "hold"),
-    "partial": ("◐", "amber"), "complete": ("●", "ok"),
+    "partial": ("◐", "amber"), "complete": ("●", "ok"), "rolled-back": ("↶", "amber"), "stale": ("○", "hold"),
     "current": ("●", "ok"), "behind": ("○", "amber"), "unpinned": ("○", "hold"), "nothing": ("·", "hold"),
 }
 
@@ -462,12 +463,26 @@ def screen_grid(db, as_of):
         candidate = ""
         if r["candidate"] and r["candidate"] != r["desired"] and st not in ("awaiting", "held", "ready"):
             candidate = f' <span class="muted">→ {esc(r["candidate"])} offered</span>'
+        if r["candidate_source"] == "rollback request":
+            candidate += (f'<div class="small amber-text">rollback to {mono(r["candidate"])} requested by {esc(r["requested_by"])}'
+                          + (f' · {esc(r["request_incident"])}' if r["request_incident"] else "") + f' {fact_ref(r["request_fact"])}</div>')
+        rolled = (f'<div class="small amber-text"><span class="glyph">↶</span> rolled back from {mono(r["rolled_back_from"])} at {esc(fmt_ts(r["rolled_back_at"]))}</div>'
+                  if r["rolled_back_from"] else "")
+        if r["carried"]:
+            carries = f'{mono(r["carried"])}<div class="muted small">since {esc(fmt_ts(r["carried_since"]))} · {esc(fmt_since(r["carried_since"], as_of))}'
+            carries += f' · update #{esc(r["ops_update"])}</div>' if r["ops_update"] else ' · <em>no Pulumi update</em></div>'
+            if r["engine_freight"] and r["engine_freight"] != r["carried"]:
+                carries += (f'<div class="small bad-text"><span class="glyph">⚠</span> engine state last enacted {mono(r["engine_freight"])} '
+                            f'(update #{esc(r["engine_update"])}) — the next <code>pulumi up</code> would re-deploy it</div>')
+        elif r["stacks_detail"]:
+            carries = f'<span class="muted">mixed</span><div class="muted small">{esc(r["stacks_detail"])}</div>'
+        else:
+            carries = '<span class="muted">nothing yet</span>'
         rows.append([
             f'<b>{esc(r["stage"])}</b><div class="muted small">{esc(r["region"])} · {esc(r["owner"])}</div>',
             chip(st) + (f'<div class="small">{detail}</div>' if detail else "") + hold + drift,
-            (f'{mono(r["desired"])}{candidate}<div class="muted small">{esc(fmt_ts(r["decided_at"]))} · {esc(r["decided_by"])}</div>' if r["desired"] else '<span class="muted">no decision yet</span>' + candidate),
-            (f'{mono(r["carried"])}<div class="muted small">since {esc(fmt_ts(r["carried_since"]))} · {esc(fmt_since(r["carried_since"], as_of))} · update #{esc(r["ops_update"])}</div>' if r["carried"]
-             else (f'<span class="muted">mixed</span><div class="muted small">{esc(r["stacks_detail"])}</div>' if r["stacks_detail"] else '<span class="muted">nothing yet</span>')),
+            (f'{mono(r["desired"])}{candidate}<div class="muted small">{esc(fmt_ts(r["decided_at"]))} · {esc(r["decided_by"])}</div>{rolled}' if r["desired"] else '<span class="muted">no decision yet</span>' + candidate),
+            carries,
         ])
     body = table(["stage", "state (derived)", "should carry (intent)", "carries (observed)"], rows, "grid")
     return section("grid", "1 · the subject grid", "What is where, since when, waiting on whom",
@@ -484,7 +499,13 @@ def lane_cell(c, as_of, via=None):
         extra = " " + chip("converged", "current", "ok tiny") if c.get("is_current") else ""
         if via:
             extra += f'<div class="small muted">{esc(via)}</div>'
+        if c.get("current_since") and c.get("reached_at") and c["current_since"] > c["reached_at"]:
+            extra += f'<div class="small muted">again {esc(fmt_ts(c["current_since"]))}</div>'
         return f'<span class="reached">{esc(fmt_ts(c["reached_at"]))}</span>{extra}'
+    if kind == "rolled-back":
+        was = f'<div class="small muted">reached {esc(fmt_ts(c["reached_at"]))}</div>' if c.get("reached_at") else '<div class="small muted">never carried</div>'
+        awaiting = f'<div class="small">{esc(c["awaiting"])}</div>' if c.get("awaiting") else ""
+        return chip("rolled-back", "rolled back") + f'<div class="small muted">{esc(fmt_ts(c["rolled_back_at"]))} → {esc(c.get("rolled_back_to"))}</div>' + was + awaiting
     if kind == "in-flight":
         return chip("in-flight", "in flight") + f'<div class="small muted">since {esc(fmt_ts(c["inflight_since"]))}</div>'
     if kind == "partial":
@@ -545,6 +566,7 @@ def screen_gates(db, as_of):
                 rows.append([chip("awaiting", "open"), esc(t["label"]),
                              f'<span class="muted">{esc(t["unmet_text"])}</span>',
                              (esc(t["evidence"]) + " " + fact_ref(t["evidence_fact"])) if t["evidence"] else "nothing running while it waits"])
+        gate = one(db, "SELECT * FROM v_gate WHERE stage=? AND freight=?", g["stage"], g["candidate"])
         if g["status"] == "ready":
             verdict = f'passes for <code>{esc(g["candidate"])}</code>; the enactment has not started.'
             heads.append(f'{g["stage"]}: gate passes')
@@ -552,8 +574,12 @@ def screen_gates(db, as_of):
             verdict = (f'does not pass for <code>{esc(g["candidate"])}</code> — awaiting <b>{esc(g["awaiting"])}</b> '
                        f'for <b>{esc(fmt_since(g["awaiting_since"], as_of))}</b> (since {esc(fmt_ts(g["awaiting_since"]))}).')
             heads.append(f'{g["stage"]}: {g["awaiting"]}')
-        parts.append(f'<h3>{esc(g["stage"])} <span class="muted">· policy {esc(pol["mode"])}</span></h3>'
-                     f'<p class="lede"><code>{esc(pol["rule"])}</code><br>{verdict}</p>' + table(["", "term", "satisfied", "evidence"], rows))
+        direction = ""
+        if gate["direction"] == "rollback":
+            direction = (f' · <b>rollback</b> direction — {mono(g["candidate"])} is older than what the stage carries'
+                         + (f'; requested by {esc(g["requested_by"])}' if g["candidate_source"] == "rollback request" else ""))
+        parts.append(f'<h3>{esc(g["stage"])} <span class="muted">· policy {esc(gate["mode"])}{direction}</span></h3>'
+                     f'<p class="lede"><code>{esc(gate["rule"])}</code><br>{verdict}</p>' + table(["", "term", "satisfied", "evidence"], rows))
     return section("gates", "2 · awaiting ≠ failure", " · ".join(esc(h) for h in heads),
                    "Gates are queries over both fact classes, evaluated at rest — each term is a row here, with the "
                    "fact that satisfies it or the reason it doesn't. An unmet term makes the stage <em>awaiting</em>: "
@@ -597,7 +623,7 @@ def screen_trace(db, as_of):
 
 
 def screen_diffgate(db, as_of):
-    stages = q(db, "SELECT DISTINCT stage FROM v_policy_term WHERE type='plan_safe_or_approved'")
+    stages = q(db, "SELECT stage, group_concat(DISTINCT direction) AS directions FROM v_policy_term WHERE type='plan_safe_or_approved' GROUP BY stage ORDER BY min(idx)")
     if not stages:
         return ""
     parts, heads = [], []
@@ -606,26 +632,34 @@ def screen_diffgate(db, as_of):
         pol = one(db, "SELECT * FROM v_policy WHERE stage=?", st)
         rows = []
         for r in q(db, "SELECT g.*, t.term_outcome, t.evidence AS term_evidence, t.evidence_fact AS term_fact, t.unmet_text AS term_unmet, t.role, "
-                       "pl.n_create, pl.n_update, pl.n_delete, pl.n_replace, pl.migrations, pl.migrations_changed, pl.against, pl.fact AS plan_fact "
+                       "pl.n_create, pl.n_update, pl.n_delete, pl.n_replace, pl.migrations, pl.migrations_changed, pl.against, pl.fact AS plan_fact, pl.current AS plan_current "
                        "FROM v_gate g JOIN v_gate_term t ON t.stage=g.stage AND t.freight=g.freight AND t.type='plan_safe_or_approved' "
                        "LEFT JOIN v_plan pl ON pl.stage=g.stage AND pl.freight=g.freight WHERE g.stage=? ORDER BY g.freight", st):
             if r["plan_fact"] is None:
                 plan = '<span class="muted">no plan yet</span>'
             else:
                 plan = (f'+{esc(r["n_create"])} ~{esc(r["n_update"])} −{esc(r["n_delete"])} ±{esc(r["n_replace"])} {fact_ref(r["plan_fact"])}'
-                        f'<div class="small muted">against {esc(r["against"])}</div>')
+                        f'<div class="small muted">against {esc(r["against"])}' + (" · <em>stale</em>" if not r["plan_current"] else "") + '</div>')
                 if r["migrations_changed"]:
                     plan += f'<div class="small"><span class="glyph">⚠</span> migrations: {esc(", ".join(json.loads(r["migrations"]) if r["migrations"] else []))}</div>'
             term = {
                 "auto":     chip("ready", "auto") + '<div class="small">safe plan — no approval needed</div>',
                 "approved": chip("converged", "approved") + f'<div class="small">not safe → {esc(r["role"])} approved: {esc(r["term_evidence"])} {fact_ref(r["term_fact"])}</div>',
                 "no-plan":  chip("awaiting", "no plan") + f'<div class="small">{esc(r["term_unmet"])}</div>',
+                "stale":    chip("stale", "stale plan") + f'<div class="small">{esc(r["term_unmet"])}</div>',
                 "open":     chip("awaiting", "open") + f'<div class="small">{esc(r["term_unmet"])}</div>',
             }[r["term_outcome"]]
             overall = (chip("ready", "gate passes") if r["passes"] else chip("awaiting", "gate: " + r["awaiting"]))
-            rows.append([mono(r["freight"]), plan, term, overall])
+            freight = mono(r["freight"]) + (f'<div class="small muted">rollback direction</div>' if r["direction"] == "rollback" else "")
+            rows.append([freight, plan, term, overall])
         heads.append(st)
-        parts.append(f'<h3>{esc(st)}</h3><p class="lede"><code>{esc(pol["rule"])}</code><br>where <em>safe</em> = <code>{esc(pol["safe_rule"])}</code></p>'
+        rules = []
+        if "forward" in s["directions"]:
+            rules.append(f'<code>{esc(pol["rule"])}</code>')
+        if "rollback" in s["directions"] and pol["rollback_rule"]:
+            rules.append(f'rollback: <code>{esc(pol["rollback_rule"])}</code>')
+        parts.append(f'<h3>{esc(st)}</h3><p class="lede">{"<br>".join(rules)}<br>where <em>safe</em> = <code>{esc(pol["safe_rule"])}</code>'
+                     + (f'<br><span class="muted">{esc(pol["rollback_description"])}</span>' if pol["rollback_description"] and "rollback" in s["directions"] else "") + '</p>'
                      + table(["freight", "plan", "plan-safe-or-approved term", "whole gate"], rows))
     return section("diffgate", "4 · a diff-gate", "\"If migrations changed, require approval; otherwise fast-track\"",
                    "Joe's question, answered as a query: the plan is a fact (stage 3 of the key decomposition — "
@@ -965,7 +999,8 @@ def screen_audit(db, as_of):
             approvals = f'{esc(d["n_required"] - d["n_unmet"])}/{esc(d["n_required"])} met ' + fact_ref(d["evidence"])
             if d["unmet"]:
                 approvals += f'<div class="small bad-text">unmet: {esc(d["unmet"])}</div>'
-        rows.append([esc(fmt_ts(d["ts"])), f'<b>{esc(d["stage"])}</b> ← {mono(d["freight"])}', esc(d["actor"]),
+        rows.append([esc(fmt_ts(d["ts"])), f'<b>{esc(d["stage"])}</b> ← {mono(d["freight"])}'
+                     + (f'<div class="small amber-text">rollback from {mono(d["incumbent"])}</div>' if d["direction"] == "rollback" else ""), esc(d["actor"]),
                      approvals, esc(d["n_refs"]),
                      (f'<span class="chip bad"><span class="glyph">⚠</span>{esc(d["flag"])}</span>' if d["flag"] else chip("converged", "clean")),
                      fact_ref(d["fact"])])
@@ -1148,7 +1183,7 @@ def render_page(facts, snapshots, page):
   <div class="clock"><div class="label">ledger as of</div><div class="now">{esc(snapshots[0][0])}</div></div>
 </header>
 <nav class="snaps" aria-label="ledger snapshots">{''.join(buttons)}</nav>
-<div class="legend"><span>● converged</span><span>○ awaiting (nothing running)</span><span>◌ in flight</span><span>↷ superseded</span><span>⊘ hold</span><span>⚠ drift</span><span>✕ failed</span><span>fact ids link into the ledger tail</span></div>
+<div class="legend"><span>● converged</span><span>○ awaiting (nothing running)</span><span>◌ in flight</span><span>↷ superseded</span><span>↶ rolled back</span><span>⊘ hold</span><span>⚠ drift</span><span>✕ failed</span><span>fact ids link into the ledger tail</span></div>
 {''.join(snap_html)}
 <footer>{page["footer"]} Source: <code>~/src/nyobe/delivery-ledger</code>.</footer>
 </div>

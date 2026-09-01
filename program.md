@@ -43,6 +43,14 @@ export default d.program("pulumi-service", {
                                             d.verified("staging", "load-generator"),
                                             d.approved({ role: "oncall", via: d.releasePrMerge() })],
                                }),
+                               // A promotion to a freight older than what the stage carries is gated
+                               // here instead: cmd/prod-rollback's checks, as terms. No block → the
+                               // ordinary terms apply in both directions.
+                               rollback: d.autoIfSafe({
+                                 requires: [d.carriedBefore({ within: "120h" }), d.notHeld()],
+                                 safe:     d.plan(p => !p.migrationsChanged),
+                                 else:     d.approved({ role: "oncall", via: "prod-rollback confirm" }),
+                               }),
                                annotate: { url: "https://app.pulumi.com", slack: "#ops-alerts" } }),
     "production-eu": d.stage({ region: "eu-central-1", upstream: "production",   // proposed: today EU runs in parallel
                                promote: d.autoIfSafe({
@@ -84,9 +92,15 @@ belongs to the enactment, and the check is a term over a plan fact.
 `requires:` is emitted as **structured terms**, not text: the policy fact
 carries `terms: [{type: "verified", stage, check}, {type: "approved",
 role}, …]` and the ledger's gate view evaluates them by joining the facts
-each term names. The five term types in use — `verified`, `carried`,
-`approved`, `not_held`, `plan_safe_or_approved` — are the vocabulary a gate
-language needs first.
+each term names. The six term types in use — `verified`, `carried`,
+`approved`, `not_held`, `plan_safe_or_approved`, `previously_carried` —
+are the vocabulary a gate language needs first.
+
+`rollback:` is the same shape under a second key. Which set a (stage,
+freight) pair is evaluated against is not declared anywhere: the freight is
+older than what the stage carries, or it is not (`v_direction`). Nothing
+about a decision says "rollback"; the audit derives the direction the
+decision had at the instant it was written from the same two facts.
 
 ## Two programs, no Uber program
 
@@ -155,6 +169,8 @@ pulumi delivery pin k8s-1.31 --member platform=P12 --member payments=A231 --orde
 | **a person** | merges the release PR / runs `delivery approve` | intent · `approval.granted` · `stage:<s>` — role, via, rationale |
 | **a person** | `delivery hold production-eu --until …` | intent · `hold.placed` · `stage:<s>` — expiry in payload |
 | **a person, side door** | does something out of band and says so | intent · `breakglass.recorded` · `stage:<s>` — scope, action, from/to, incident, expiry |
+| **a person** | `prod-rollback <sha>` / `delivery rollback production --to F417` | intent · `rollback.requested` · `stage:<s>` — the target freight, incident, via. A nomination, like `release.cut`: it makes the freight the stage's candidate; the policy's rollback terms decide, and write the same `promotion.decided` |
+| **the tool's own check** | `prod-rollback` compares `migrations/` between the running and target SHAs | observation · `plan.summarized` · `stage:<s>` — the backward plan, actor `cli:prod-rollback`; read by the rollback direction's `plan_safe_or_approved` term |
 | **a person** | takes up a published record on a gated edge, or approves one | intent · `uptake.decided` / `approval.granted` · `edge:<…>` — record version, role |
 | **a bot's PR merge** | the bump PR for a by-version pin lands | intent · `uptake.decided` · `edge:<…>` — record version, the PR; the next `freight.discovered` carries the pin in its config |
 | **whoever proposes a release across programs** | `pulumi delivery pin …` | intent · `release.pinned` · `release:<name>` — one member freight per program, an order, a reason |
@@ -170,7 +186,13 @@ Two doors, one destination: the merge that approves and the ECS console
 click that rolls back both land as intent facts with an actor and a reason.
 That is what lets the grid explain drift instead of fighting it — and what
 lets the decision audit tell a policy-written promotion from one a person
-typed in.
+typed in. A rollback has both doors too: the api-only ECS click on Monday
+night is a break-glass fact explaining drift; Thursday's `prod-rollback`
+run is a request, a backward plan, a confirmation and a policy decision —
+the front door, with the tool's checks as the gate. Recorded as it runs
+today (a person deciding, no policy), the same run is a `promotion.decided`
+typed by a person, which the audit flags: today's rollback is a side door
+with a gate in it.
 
 Declarations that write no fact in this slice: `enact:` and `verify:`.
 Their content shows up only through what executors and watches later

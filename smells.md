@@ -301,3 +301,108 @@ again because the second fixture was chosen to break it.
     once; `v_inflight` keeps one row per stage (the grid joins on it) but
     now counts and names every open leg. The first version showed only the
     latest, which is the single-stack assumption in one more place.
+
+## 2026-09-01 — rollback by the front door (pulumi-service, Thursday)
+
+**Still no second mutable table.** A rollback request, a backward plan, a
+policy decision in the other direction, a freight carried twice, and every
+screen still a SELECT over `facts`. What it cost the views, honestly:
+
+33. **Consent lapses when intent moves on.** The first version of the gate
+    let F418's standing approval re-promote it the instant the rollback
+    landed, and let F417's Monday approval wave Thursday's rollback through
+    with nobody confirming. The rule that stops both: an approval for
+    (stage, freight) counts only if given after the latest decision that
+    moved the stage off that freight (`v_intent_moved`). It is an
+    intent-class floor — decisions, not enactments — deliberately: an
+    enactment-based floor ("withdrawn when another freight succeeded") has
+    a hole for a freight that was decided and aborted before it ever ran,
+    which is exactly the canary-abort case. Verifications keep their
+    observation-class floor (recorded after the first carry) and do not
+    lapse on a reversal: evidence about how a freight behaved does not
+    expire when consent does. Plans get a third rule (#37). Three floors,
+    three fact kinds, each floored on the kind of fact it is about — worth
+    stating that way in OPEN 4.
+
+34. **Direction is a relation, not a field.** A pair (stage, freight) is
+    in the rollback direction when the freight was discovered before the
+    stage's incumbent (`v_direction`); the policy may declare a `rollback`
+    block and a stage without one gates rollbacks with its ordinary terms
+    (production-eu does, and its follower terms are the right ones). The
+    decision fact carries nothing about direction — the audit derives the
+    direction the decision *had at that instant* from the same two facts
+    (`v_audit_ctx`), so a person cannot claim the forward gate for a
+    backward promotion. The ambiguity the derivation leaves: a stage whose
+    stacks disagree has no carried freight, so the incumbent falls back to
+    the latest success on any stack.
+
+35. **Rollback needs a nomination, not a decision kind.** Forward, the
+    candidate comes from upstream; a rollback target comes from history,
+    and nothing upstream ever offers it. `rollback.requested` is that
+    nomination — the only forward analogue is `release.cut`, which
+    nominates a freight for the train — and the decision it leads to is an
+    ordinary `promotion.decided`. The mutation that removes the request
+    shows the split: the rollback gate for F417 still evaluates at rest,
+    but nothing makes F417 the candidate. Whether the request should
+    instead be an approval that doubles as a nomination was considered and
+    rejected: the auto-if-safe branch (no migration) needs no approval and
+    would then have no nomination either.
+
+36. **Front door for the ledger, side door for the engine.** `prod-rollback`
+    swaps task definitions with `UpdateService`; no Pulumi update runs.
+    The ledger records a proper decision and a successful transition with
+    `ops_update` NULL; the conformance watch reads ECS and finds it matches
+    intent; and the engine's state still describes F418 — the next
+    `pulumi up` would re-deploy it. The grid now carries `engine_freight`
+    (the freight of the latest success that ran a Pulumi update) and warns
+    when it differs from what runs. That is a drift ECS cannot see and the
+    ledger can, and it is Keith's two reconciliations in one row: world →
+    intent is clean, state → world is not.
+
+37. **A plan is against a world.** The first floor tried ("a plan must
+    postdate the stage's current carried-since") marked the incumbent's
+    own pre-enactment plan stale, since every plan precedes the carry it
+    leads to. The honest rule: a plan for F is stale once the stage has
+    carried some *other* freight since it was computed. It changed one
+    Wednesday check: production-eu's plan for F416 (Aug 18, against F415)
+    now reads `stale` rather than `auto` — correct, since a rollback to
+    F416 would need a fresh plan against F417. Stale is a fourth term
+    outcome beside auto / approved / open / no-plan.
+
+38. **The lookback is a term that reads the clock.** `previously_carried
+    {within_hours: 120}` is `prod-rollback`'s task-definition window as a
+    gate term; after `not_held` it is the second term whose answer depends
+    on `now`, and the gate's answer for F416 at production changes on Aug
+    23 with no new fact. Time-dependent terms are the reason the clock is
+    an input (#1) and the reason "as of T" is only half-expressible (#15).
+
+39. **Passing through is history; reversal is not.** The first lanes
+    version marked every freight the stage had moved off as withdrawn,
+    which made F416's ordinary journey look like an incident. `v_reversal`
+    is intent moving from a freight to an *older* one, and only that
+    renders `rolled-back` (whether the freight had been carried or was
+    still in flight). One derivation, read by lanes, the grid, the trace
+    and the release cards. F417, reached twice, shows its first arrival
+    and "again Thu 11:14" from `v_carried.since` — the carried-since rule
+    from #19 already had the second stint right.
+
+40. **A change is in a stage iff the stage's freight contains it.** The
+    trace cell's `reached` was ever-reached; after a rollback that hides
+    the fact that #46173 (the INC-2311 fix) left production. `is_current`
+    on a trace cell is now derived from cumulative membership joined to
+    what the stage carries, and the summary line names the stages a
+    change was rolled back from. Both scenarios' existing trace checks
+    held; the rollback is what made the distinction visible.
+
+41. **The rollback re-exposes a fixed bug, and no view says so.** Rolling
+    production back to F417 brings back the rate-limit collision F418
+    fixed; the request's rationale says it, and the trace shows #46173
+    rolled back, but nothing connects INC-2311 to the PR that closed it
+    and hence to "INC-2311's fix is no longer in production". An incident
+    would be a subject with facts of its own; not modelled here.
+
+42. **`rollback.requested` has no retraction.** A request is open until
+    the next decision on the stage answers it. A person who changes their
+    mind writes nothing that closes it; the candidate stays the requested
+    freight until some decision lands. Cheap to add (`rollback.withdrawn`,
+    or a request naming no freight); left out until a fixture wants it.

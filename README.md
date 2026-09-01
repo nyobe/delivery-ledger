@@ -50,7 +50,7 @@ and the sharper statement of why it is there (smells.md #18).
 | `views.sql` | every screen as a view: subjects → current state → gate terms → grid, lanes, trace, uptake, releases, audit — shared by every scenario |
 | `render.py` | lint → self-checks (including mutation checks) → HTML; holds no state of its own |
 | `scenarios/<name>/fixture.py` | a scenario as a timeline; emits `facts.jsonl` beside it so one story can't drift into two |
-| `scenarios/<name>/facts.jsonl` | the ledger for that scenario (pulumi-service: 132 facts across two weeks; multistack: 143 facts across two programs) |
+| `scenarios/<name>/facts.jsonl` | the ledger for that scenario (pulumi-service: 158 facts across two weeks; multistack: 143 facts across two programs) |
 | `scenarios/<name>/scenario.py` | the scenario's page chrome, snapshot instants, and self-checks |
 | `program.md` | the authoring side: what a delivery program *declares*, and which facts each declaration writes |
 | `smells.md` | the acceptance log: anywhere a view wanted state the ledger doesn't hold, and what the slice taught |
@@ -80,6 +80,46 @@ without one renders as UNEXPLAINED), Keith's release cards, the inside of a
 transition (phase facts, resource steps, a failure with its step, an
 abandonment citing the decision that superseded it), a decision audit, and
 the ledger tail with every fact id linkable.
+
+## Rollback by the front door
+
+Thursday extends the grounded story: F418 ships to both regions in the
+morning (the api break-glass expires with the promotion, as it said it
+would), then an incident, and oncall runs `cmd/prod-rollback` against F417
+for US only. The tool's mechanics — a 120h task-definition lookback, a
+migration-safety check that blocks unless confirmed, `UpdateService` per
+ECS service with no Pulumi update — become facts and terms:
+
+- **A rollback is a nomination, not a new decision kind.** `rollback.requested`
+  names the target freight the way `release.cut` names one for the train;
+  while it is open the stage's candidate comes from history instead of
+  upstream. The decision that answers it is an ordinary `promotion.decided`.
+- **Direction is derived, never written.** A freight discovered before the
+  stage's incumbent is a rollback; the policy's `rollback:` block gates it
+  (`previously_carried{within 120h}`, `not_held`, `plan_safe_or_approved`),
+  a stage with no block uses its ordinary terms in both directions
+  (production-eu follows production into the rollback under its follower
+  terms), and the audit derives the direction a decision had at the instant
+  it was written.
+- **The backward diff-gate.** The migration check lands as a `plan.summarized`
+  for F417 *against* F418 with the index migration in it; the same
+  `plan_safe_or_approved` term reads it, and "blocked — confirm?" is its
+  approval half.
+- **Consent lapses when intent moves on.** An approval counts only if given
+  after the latest decision that moved the stage off that freight. Without
+  this rule F418's standing approval re-promotes it the moment the rollback
+  lands, and F417's Monday approval waves the rollback through with no one
+  confirming; with it, both wait for a fresh approval. Plans have the
+  matching rule against enactments: a plan predating another freight's
+  carry is stale.
+- **Front door for the ledger, side door for the engine.** The rollback
+  transition ran no Pulumi update; the grid shows what the engine last
+  enacted (F418, update #3199) beside what runs (F417) — a drift the
+  conformance watch cannot see, because ECS agrees with intent.
+- Lanes and trace say *rolled back*, not *superseded*: F418's production
+  cell, and PR #46173 (the INC-2311 fix) rolled back from production while
+  still in production-eu. F417 reads "reached Mon 16:31 · again Thu 11:14";
+  F416, which production simply moved past, stays plain history.
 
 ## The second scenario: two programs, no Uber program
 
@@ -133,8 +173,11 @@ downstream" question (log 2026-08-27-field-updates); the second customer's
 criterion for subject boundaries; Moderna's hyper-preview; and the
 by-version AMI path the first slice's review surfaced (smells.md #17).
 
-The page carries five snapshots of the same ledger: Wed 17:45 (F418 waiting
-on oncall; production drifted since Monday night); Mon 16:20 (F417
+The pulumi-service page carries seven snapshots of the same ledger: Thu
+12:30 (production rolled back to F417 by the front door; F418 needs
+re-approval; EU awaiting oncall to follow); Thu 11:00 (the rollback
+requested, held by the backward diff-gate); Wed 17:45 (F418 waiting on
+oncall; production drifted since Monday night); Mon 16:20 (F417
 mid-rollout, both versions live); Mon 16:50 (the EU diff-gate holding F417);
 Wed 16:15 (F419 failed in testing-eu); Wed 16:21 (F420 superseding F419
 mid-flight). The renderer only loads facts at or before the chosen instant —
@@ -145,18 +188,25 @@ the switch is a demonstration that state lives in the ledger, not the UI.
 A policy declares its gate as a list of typed terms —
 
 ```
-verified{stage, check}   carried{stage}   approved{role}   not_held{}   plan_safe_or_approved{role}
+verified{stage, check}   carried{stage}   approved{role}   not_held{}   plan_safe_or_approved{role}   previously_carried{within_hours}
 ```
 
-— and `v_gate_term` evaluates each term for every (stage, freight) pair by
-joining the relevant view: a verification counts only if it was recorded
-after the stage carried the freight (you verify what ran); an approval
-counts only with the required role; a hold fails the term for every freight
-while it is active. `v_gate` is then *all terms satisfied*, with the first
+— once for the forward direction and, optionally, once for rollbacks — and
+`v_gate_term` evaluates each term for every (stage, freight) pair, in the
+pair's direction, by joining the relevant view. Three floors make the
+terms honest about time: a verification counts only if recorded after the
+stage carried the freight (you verify what ran); an approval counts only if
+given after the latest decision that moved the stage off that freight
+(consent lapses when intent moves on); a plan counts only while no other
+freight has been carried since it was computed (a plan is against a world).
+An approval counts only with the required role; a hold fails the term for
+every freight while it is active; the lookback term reads the clock.
+`v_gate` is then *all terms satisfied*, with the first
 unmet term as what the stage is waiting on and the latest satisfied term (or
-the blocker's own onset — a hold's placement, a plan's timestamp) as when
+the blocker's own onset — a hold's placement, a plan's timestamp, the
+reversal an approval lapsed at) as when
 the wait began. The human-readable `rule` on each policy is rendered from the
-same terms by `fixture.py`, so text and evaluation can't disagree. These five
+same terms by `fixture.py`, so text and evaluation can't disagree. These six
 term types are, concretely, the vocabulary a gate-expression language would
 need (architecture OPEN 4). Edges carry the same terms for
 their uptake gate (`v_uptake_term`), evaluated against the latest published
@@ -181,16 +231,22 @@ so rather than passing them.
   `awaiting`/`drifted`/`converged`/`held`/`superseded` values anywhere;
 - every policy-written promotion decision passed its gate at the instant it
   was written (the ledger rebuilt at each decision's own timestamp);
-- the scenario's self-checks pass (60 for pulumi-service, 58 for
+- the scenario's self-checks pass (85 for pulumi-service, 61 for
   multistack), each pinning something a view must *include and exclude* at
-  one instant — and eleven (ten) of them are **mutation checks**. For
+  one instant — and eighteen (thirteen) of them are **mutation checks**. For
   pulumi-service: the fixture is altered in memory (a verification moved before
   its deployment; a verification for a freight the stage never carried; an
   approval by the wrong role; a decision written by a person; an approval
   deleted and its ref stripped, on a gated stage and on an auto-if-safe
   stage; a second approval term added to a policy; a second active hold; a
   duplicate approval; the break-glass fact removed; a verification flipped
-  to fail) and the views must say so. For multistack: a staging verification
+  to fail; and for the rollback — Thursday's confirmation deleted so only
+  Monday's approval remains; a fresh re-approval of F418 after the
+  reversal; EU's fresh plan deleted so only Monday's plan and approval
+  remain; the request re-pointed at F416, outside the lookback; the
+  rollback decision typed by a person; the migration removed from the
+  backward plan; the request removed) and the views must say so. For
+  multistack: a staging verification
   recorded between the network leg and the retried cluster leg; an uptake
   with its approval deleted, or written by a person, or approved by the
   wrong role; a preview flipped to safe; a hold on the consumer stage; the
@@ -299,6 +355,7 @@ and commit subjects. Status here:
 | head SHA vs merge-commit SHA | not distinguished — see "content-keyed freight" above |
 | "yours" filter | client-side over `author` — unchanged |
 | cut / close release buttons | intent doors: `release.cut` is a fact; a button would write one; `release.closed` is not modelled |
+| `cmd/prod-rollback` (lookback, migration check, `UpdateService`, US/EU) | `rollback.requested` + a backward `plan.summarized` + the policy's `rollback:` terms; the enactment records no Pulumi update and the grid shows the engine's last enactment beside what runs |
 
 Keith's own list of what DaC would need to provide (from the tracker
 investigation): a stage-progression entity → `transition` + `promotion.decided`;

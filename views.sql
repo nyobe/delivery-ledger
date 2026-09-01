@@ -56,22 +56,42 @@ SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.terms')           AS terms,
        json_extract(f.payload, '$.safe')            AS safe_rule,
        json_extract(f.payload, '$.description')     AS description,
+       -- the rollback direction, when the policy declares one (a stage without
+       -- a rollback block gates a rollback with its ordinary terms)
+       json_extract(f.payload, '$.rollback.mode')   AS rollback_mode,
+       json_extract(f.payload, '$.rollback.terms')  AS rollback_terms,
+       json_extract(f.payload, '$.rollback.rule')   AS rollback_rule,
+       json_extract(f.payload, '$.rollback.description') AS rollback_description,
        f.ts AS declared_at, f.id AS fact
 FROM facts f
 WHERE f.kind = 'policy.declared'
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);
 
--- One row per gate term, in the order the policy lists them. The term types
--- are the vocabulary a gate-expression language would need (OPEN 4).
+-- One row per gate term per direction, in the order the policy lists them.
+-- The term types are the vocabulary a gate-expression language would need
+-- (OPEN 4). A promotion to a freight older than what the stage carries is
+-- evaluated against the rollback terms; everything else against the forward
+-- ones.
 CREATE VIEW v_policy_term AS
-SELECT p.stage,
+SELECT p.stage, 'forward'                           AS direction,
        t.key                                        AS idx,
        json_extract(t.value, '$.type')              AS type,
        json_extract(t.value, '$.stage')             AS term_stage,
        json_extract(t.value, '$.check')             AS chk,
        json_extract(t.value, '$.role')              AS role,
-       json_extract(t.value, '$.via')               AS via
-FROM v_policy p, json_each(p.terms) t;
+       json_extract(t.value, '$.via')               AS via,
+       json_extract(t.value, '$.within_hours')      AS within_hours
+FROM v_policy p, json_each(p.terms) t
+UNION ALL
+SELECT p.stage, 'rollback',
+       t.key,
+       json_extract(t.value, '$.type'),
+       json_extract(t.value, '$.stage'),
+       json_extract(t.value, '$.check'),
+       json_extract(t.value, '$.role'),
+       json_extract(t.value, '$.via'),
+       json_extract(t.value, '$.within_hours')
+FROM v_policy p, json_each(coalesce(p.rollback_terms, p.terms)) t;
 
 -- A binding is consumer-resident wiring (P4): by-reference (a per-stage
 -- record, taken up under the edge's own policy) or by-version (a pin in the
@@ -157,6 +177,43 @@ SELECT substr(f.subject, 7)                         AS stage,
 FROM facts f
 WHERE f.kind = 'promotion.decided'
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);
+
+-- Every promotion decision, with the freight the stage was decided to before it.
+CREATE VIEW v_decision AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, '$.freight')         AS freight,
+       f.ts, f.seq, f.actor, f.rationale, f.id AS fact,
+       (SELECT json_extract(p.payload, '$.freight') FROM facts p
+         WHERE p.kind = 'promotion.decided' AND p.subject = f.subject AND p.seq < f.seq
+         ORDER BY p.seq DESC LIMIT 1)                AS from_freight
+FROM facts f
+WHERE f.kind = 'promotion.decided';
+
+-- When intent last moved away from a freight at a stage: the latest decision
+-- there for another freight, after this one was first decided. Consent lapses
+-- when intent moves on — an approval only counts once it postdates that
+-- instant — so the standing approval that shipped a freight cannot re-promote
+-- it after a rollback, a rollback target's old approval cannot wave the
+-- rollback through, and an aborted canary's approval does not re-fire it.
+-- NULL while intent has never moved away.
+CREATE VIEW v_intent_moved AS
+SELECT d.stage, d.freight, d.first_seq,
+       (SELECT max(o.ts) FROM v_decision o
+         WHERE o.stage = d.stage AND o.freight <> d.freight AND o.seq > d.first_seq) AS moved_at,
+       (SELECT o.freight FROM v_decision o
+         WHERE o.stage = d.stage AND o.freight <> d.freight AND o.seq > d.first_seq
+         ORDER BY o.seq DESC LIMIT 1)                AS moved_to
+FROM (SELECT stage, freight, min(seq) AS first_seq FROM v_decision GROUP BY stage, freight) d;
+
+-- A reversal: intent moved from a freight to an older one. Derived from two
+-- decisions, never written; lanes, the grid and the trace all read this one
+-- view for "rolled back".
+CREATE VIEW v_reversal AS
+SELECT m.stage, m.freight, m.moved_at AS at, m.moved_to AS to_freight
+FROM v_intent_moved m
+JOIN v_freight f  ON f.freight = m.freight
+JOIN v_freight t  ON t.freight = m.moved_to
+WHERE t.discovered_at < f.discovered_at;
 
 -- A transition is the enactment: started once, phases and steps in between,
 -- finished at most once (succeeded | failed | abandoned).
@@ -266,6 +323,37 @@ WHERE t.finished_at IS NOT NULL
   AND t.finished_seq = (SELECT max(u.finished_seq) FROM v_freight_transition u
                         WHERE u.stage = t.stage AND u.finished_at IS NOT NULL);
 
+-- The first time a stage carried a freight on any stack, and the last time it
+-- did, by arrival order (a stage can carry a freight in several stints).
+CREATE VIEW v_first_success AS
+SELECT t.stage, t.freight, min(t.finished_seq) AS first_seq, min(t.finished_at) AS first_at,
+       max(t.finished_seq) AS last_seq, max(t.finished_at) AS last_at
+FROM v_freight_transition t
+WHERE t.outcome = 'succeeded' AND t.freight IS NOT NULL
+GROUP BY t.stage, t.freight;
+
+-- The incumbent on a stage: what it carries, or — while its stacks disagree —
+-- the latest freight that succeeded on any of them.
+CREATE VIEW v_incumbent AS
+SELECT s.stage,
+       coalesce(k.freight, (SELECT t.freight FROM v_freight_transition t
+                             WHERE t.stage = s.stage AND t.outcome = 'succeeded' AND t.freight IS NOT NULL
+                             ORDER BY t.finished_seq DESC LIMIT 1)) AS freight
+FROM v_stage s
+LEFT JOIN v_carried k ON k.stage = s.stage;
+
+-- Direction is derived, never written: promoting a freight discovered before
+-- the incumbent is a rollback; anything else is forward. Rollback-ness is a
+-- relation between two freights at a stage, not a property of a decision.
+CREATE VIEW v_direction AS
+SELECT s.stage, fr.freight,
+       CASE WHEN inc.discovered_at IS NOT NULL AND fr.discovered_at < inc.discovered_at THEN 'rollback' ELSE 'forward' END AS direction,
+       inc.freight AS incumbent
+FROM v_stage s
+CROSS JOIN v_freight fr
+LEFT JOIN v_incumbent i ON i.stage = s.stage
+LEFT JOIN v_freight inc ON inc.freight = i.freight;
+
 -- Verification status per (stage, freight, check): latest outcome wins.
 CREATE VIEW v_verified AS
 SELECT substr(f.subject, 7)                         AS stage,
@@ -281,14 +369,19 @@ WHERE f.kind = 'verification.recorded'
                  AND json_extract(g.payload, '$.freight') = json_extract(f.payload, '$.freight')
                  AND json_extract(g.payload, '$.check')   = json_extract(f.payload, '$.check'));
 
--- Every stage approval, with its role. Gates pick the latest matching one.
+-- Every stage approval, with its role. Gates pick the latest matching one
+-- that is still valid: given after intent last moved the stage away from the
+-- freight (v_intent_moved).
 CREATE VIEW v_approval AS
 SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.freight')         AS freight,
        json_extract(f.payload, '$.role')            AS role,
        json_extract(f.payload, '$.via')             AS via,
-       f.actor, f.ts, f.seq, f.rationale, f.id AS fact
+       f.actor, f.ts, f.seq, f.rationale, f.id AS fact,
+       m.moved_at,
+       (f.ts >= coalesce(m.moved_at, ''))           AS valid
 FROM facts f
+LEFT JOIN v_intent_moved m ON m.stage = substr(f.subject, 7) AND m.freight = json_extract(f.payload, '$.freight')
 WHERE f.kind = 'approval.granted' AND f.subject LIKE 'stage:%';
 
 -- An approval on an edge: for taking up one record version.
@@ -342,6 +435,11 @@ SELECT substr(f.subject, 7)                         AS stage,
             ELSE (json_extract(f.payload, '$.delete') = 0
                   AND json_extract(f.payload, '$.replace') = 0
                   AND NOT json_extract(f.payload, '$.migrations_changed')) END AS safe,
+       -- a plan is against the world at T: once the stage has carried some
+       -- other freight since it was computed, it is stale
+       (NOT EXISTS (SELECT 1 FROM v_freight_transition o
+                     WHERE o.stage = substr(f.subject, 7) AND o.outcome = 'succeeded' AND o.freight IS NOT NULL
+                       AND o.freight <> json_extract(f.payload, '$.freight') AND o.finished_at > f.ts)) AS current,
        f.ts, f.id AS fact
 FROM facts f
 WHERE f.kind = 'plan.summarized'
@@ -405,10 +503,26 @@ WHERE f.kind = 'job.finished';
 -- Derived: candidate, gate terms, gate
 ---------------------------------------------------------------------------
 
--- The candidate is what each stage's upstream offers it right now.
+-- A rollback request nominates a freight the stage carried before, the way a
+-- release cut nominates one for the train. It is open until the next decision
+-- on the stage answers it.
+CREATE VIEW v_rollback_request AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, '$.freight')         AS freight,
+       json_extract(f.payload, '$.incident')        AS incident,
+       json_extract(f.payload, '$.via')             AS via,
+       f.actor, f.ts, f.rationale, f.id AS fact, f.seq,
+       (f.seq > coalesce((SELECT max(d.seq) FROM facts d WHERE d.kind = 'promotion.decided' AND d.subject = f.subject), 0)) AS open
+FROM facts f
+WHERE f.kind = 'rollback.requested'
+  AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);
+
+-- The candidate is what each stage's upstream offers it right now — or, while
+-- a rollback request is open, the freight it asks for.
 CREATE VIEW v_candidate AS
 SELECT s.stage,
   CASE
+    WHEN rr.open THEN rr.freight
     WHEN s.upstream LIKE 'warehouse:%' THEN
       (SELECT fr.freight FROM v_freight fr WHERE fr.warehouse = substr(s.upstream, 11)
         ORDER BY fr.discovered_at DESC, fr.seq DESC LIMIT 1)
@@ -419,6 +533,7 @@ SELECT s.stage,
       (SELECT k.freight FROM v_carried k WHERE k.stage = s.upstream)
   END AS freight,
   CASE
+    WHEN rr.open THEN rr.ts
     WHEN s.upstream LIKE 'warehouse:%' THEN
       (SELECT fr.discovered_at FROM v_freight fr WHERE fr.warehouse = substr(s.upstream, 11)
         ORDER BY fr.discovered_at DESC, fr.seq DESC LIMIT 1)
@@ -427,15 +542,24 @@ SELECT s.stage,
         WHERE fr.cut_at IS NOT NULL ORDER BY fr.cut_at DESC, fr.seq DESC LIMIT 1)
     ELSE
       (SELECT k.since FROM v_carried k WHERE k.stage = s.upstream)
-  END AS available_at
-FROM v_stage s;
+  END AS available_at,
+  CASE WHEN rr.open THEN 'rollback request' ELSE 'upstream' END AS source,
+  CASE WHEN rr.open THEN rr.actor END    AS requested_by,
+  CASE WHEN rr.open THEN rr.incident END AS request_incident,
+  CASE WHEN rr.open THEN rr.fact END     AS request_fact
+FROM v_stage s
+LEFT JOIN v_rollback_request rr ON rr.stage = s.stage;
 
--- Every gate term evaluated for every (stage, freight) pair: satisfied_at is
--- the time of the fact that satisfies it (NULL = unmet). A verification only
--- counts once the stage actually carried the freight — you verify what ran.
--- This is what makes "would this gate pass right now?" answerable at rest.
+-- Every gate term evaluated for every (stage, freight) pair, in the pair's
+-- direction: satisfied_at is the time of the fact that satisfies it (NULL =
+-- unmet). A verification only counts once the stage actually carried the
+-- freight — you verify what ran. An approval only counts if given after
+-- intent last moved the stage away from the freight — consent lapses when
+-- intent moves on. A plan only counts if computed against what the stage
+-- carries now — a plan is about the world at T. This is what makes "would
+-- this gate pass right now?" answerable at rest.
 CREATE VIEW v_gate_term AS
-SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
+SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.role, t.within_hours,
   CASE t.type
     WHEN 'verified' THEN
       (SELECT v.ts FROM v_verified v
@@ -446,13 +570,18 @@ SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN 'approved' THEN
       (SELECT a.ts FROM v_approval a
-        WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role ORDER BY a.seq DESC LIMIT 1)
+        WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND a.valid ORDER BY a.seq DESC LIMIT 1)
     WHEN 'not_held' THEN
       CASE WHEN NOT EXISTS (SELECT 1 FROM v_hold_active h WHERE h.stage = s.stage) THEN '' END
     WHEN 'plan_safe_or_approved' THEN
-      coalesce((SELECT pl.ts FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight AND pl.safe = 1),
+      coalesce((SELECT pl.ts FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight AND pl.safe = 1 AND pl.current),
                (SELECT a.ts FROM v_approval a
-                 WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role ORDER BY a.seq DESC LIMIT 1))
+                 WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND a.valid ORDER BY a.seq DESC LIMIT 1))
+    WHEN 'previously_carried' THEN
+      (SELECT fs.last_at FROM v_first_success fs
+        WHERE fs.stage = s.stage AND fs.freight = fr.freight
+          AND (t.within_hours IS NULL
+               OR fs.last_at >= strftime('%Y-%m-%dT%H:%M:%SZ', (SELECT now FROM clock), '-' || t.within_hours || ' hours')))
   END AS satisfied_at,
   CASE t.type
     WHEN 'verified'              THEN 'verified in ' || t.term_stage || ': ' || t.chk
@@ -460,6 +589,7 @@ SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
     WHEN 'approved'              THEN 'approved by ' || t.role || coalesce(' (' || t.via || ')', '')
     WHEN 'not_held'              THEN 'no active hold'
     WHEN 'plan_safe_or_approved' THEN 'plan safe, or approved by ' || t.role
+    WHEN 'previously_carried'    THEN 'carried by ' || s.stage || ' before' || coalesce(' (within ' || t.within_hours || 'h)', '')
   END AS label,
   CASE t.type
     WHEN 'verified' THEN
@@ -472,24 +602,47 @@ SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
            THEN 'verification: ' || t.chk || ' in ' || t.term_stage || ' (recorded before ' || t.term_stage || ' carried ' || fr.freight || ' — re-run)'
            ELSE 'verification: ' || t.chk || ' in ' || t.term_stage END
     WHEN 'carried'               THEN t.term_stage || ' to carry ' || fr.freight
-    WHEN 'approved'              THEN 'approval: ' || t.role
+    WHEN 'approved' THEN
+      'approval: ' || t.role ||
+      coalesce((SELECT ' (the approval at ' || a.ts || ' predates the decision that moved ' || s.stage || ' off ' || fr.freight || ' at ' || a.moved_at || ' — re-approve)'
+                  FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND NOT a.valid
+                 ORDER BY a.seq DESC LIMIT 1), '')
     WHEN 'not_held'              THEN 'hold until ' || (SELECT h.until_ts FROM v_hold_active h WHERE h.stage = s.stage)
     WHEN 'plan_safe_or_approved' THEN
       CASE WHEN (SELECT pl.fact FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight) IS NULL
            THEN 'plan for ' || s.stage
-           ELSE 'approval: ' || t.role || ' (plan not safe)' END
+           WHEN NOT (SELECT pl.current FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight)
+           THEN 'plan for ' || s.stage || ' (the plan at ' || (SELECT pl.ts FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight)
+                || ' predates what ' || s.stage || ' carries now — recompute)'
+           ELSE 'approval: ' || t.role || ' (plan not safe)' ||
+                coalesce((SELECT ' (the approval at ' || a.ts || ' predates the decision that moved ' || s.stage || ' off ' || fr.freight || ' — re-approve)'
+                            FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND NOT a.valid
+                           ORDER BY a.seq DESC LIMIT 1), '') END
+    WHEN 'previously_carried' THEN
+      CASE WHEN NOT EXISTS (SELECT 1 FROM v_first_success fs WHERE fs.stage = s.stage AND fs.freight = fr.freight)
+           THEN s.stage || ' never carried ' || fr.freight
+           ELSE s.stage || ' last carried ' || fr.freight || ' at '
+                || (SELECT fs.last_at FROM v_first_success fs WHERE fs.stage = s.stage AND fs.freight = fr.freight)
+                || ', outside ' || t.within_hours || 'h' END
   END AS unmet_text,
-  -- when the wait on an unmet term began, where the term has an onset of its own
+  -- when the wait on an unmet term began, where the term has an onset of its
+  -- own: a hold's placement, a plan's timestamp, or — for an approval that
+  -- lapsed — the decision that moved intent away
   CASE t.type
     WHEN 'not_held'              THEN (SELECT h.placed_at FROM v_hold_active h WHERE h.stage = s.stage)
-    WHEN 'plan_safe_or_approved' THEN (SELECT pl.ts FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight)
+    WHEN 'approved'              THEN (SELECT m.moved_at FROM v_intent_moved m WHERE m.stage = s.stage AND m.freight = fr.freight
+                                        AND EXISTS (SELECT 1 FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND NOT a.valid))
+    WHEN 'plan_safe_or_approved' THEN max(coalesce((SELECT pl.ts FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight AND pl.current), ''),
+                                         coalesce((SELECT m.moved_at FROM v_intent_moved m WHERE m.stage = s.stage AND m.freight = fr.freight
+                                                    AND EXISTS (SELECT 1 FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND NOT a.valid)), ''))
   END AS onset_at,
   -- how a disjunctive term was (or wasn't) met — read by the diff-gate screen
   CASE t.type
     WHEN 'plan_safe_or_approved' THEN
-      CASE WHEN EXISTS (SELECT 1 FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight AND pl.safe = 1) THEN 'auto'
-           WHEN EXISTS (SELECT 1 FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role) THEN 'approved'
+      CASE WHEN EXISTS (SELECT 1 FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight AND pl.safe = 1 AND pl.current) THEN 'auto'
+           WHEN EXISTS (SELECT 1 FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND a.valid) THEN 'approved'
            WHEN NOT EXISTS (SELECT 1 FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight) THEN 'no-plan'
+           WHEN NOT EXISTS (SELECT 1 FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight AND pl.current) THEN 'stale'
            ELSE 'open' END
   END AS term_outcome,
   CASE t.type
@@ -499,13 +652,16 @@ SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
       (SELECT k.fact FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN 'approved' THEN
       (SELECT a.fact FROM v_approval a
-        WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role ORDER BY a.seq DESC LIMIT 1)
+        WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND a.valid ORDER BY a.seq DESC LIMIT 1)
     WHEN 'not_held' THEN
       (SELECT h.facts FROM v_hold_active h WHERE h.stage = s.stage)
     WHEN 'plan_safe_or_approved' THEN
       coalesce((SELECT a.fact FROM v_approval a
-                 WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role ORDER BY a.seq DESC LIMIT 1),
+                 WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND a.valid ORDER BY a.seq DESC LIMIT 1),
                (SELECT pl.fact FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight))
+    WHEN 'previously_carried' THEN
+      (SELECT t2.finished_fact FROM v_freight_transition t2
+        WHERE t2.stage = s.stage AND t2.freight = fr.freight AND t2.outcome = 'succeeded' ORDER BY t2.finished_seq DESC LIMIT 1)
   END AS evidence_fact,
   CASE t.type
     WHEN 'verified' THEN
@@ -515,23 +671,30 @@ SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
       (SELECT 'since ' || k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN 'approved' THEN
       (SELECT a.actor || ' via ' || a.via FROM v_approval a
-        WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role ORDER BY a.seq DESC LIMIT 1)
+        WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role AND a.valid ORDER BY a.seq DESC LIMIT 1)
     WHEN 'not_held' THEN
       (SELECT h.holders || ': ' || h.rationale FROM v_hold_active h WHERE h.stage = s.stage)
     WHEN 'plan_safe_or_approved' THEN
       (SELECT 'plan +' || pl.n_create || ' ~' || pl.n_update || ' −' || pl.n_delete || ' ±' || pl.n_replace
               || CASE WHEN pl.migrations_changed THEN ', migrations' ELSE '' END
               || CASE WHEN pl.safe = 1 THEN ' — safe' ELSE ' — not safe' END
+              || CASE WHEN pl.current THEN '' ELSE ' (stale)' END
          FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight)
+    WHEN 'previously_carried' THEN
+      (SELECT 'first ' || fs.first_at || ', last ' || fs.last_at FROM v_first_success fs WHERE fs.stage = s.stage AND fs.freight = fr.freight)
   END AS evidence
 FROM v_stage s
 CROSS JOIN v_freight fr
-JOIN v_policy_term t ON t.stage = s.stage;
+JOIN v_direction dr ON dr.stage = s.stage AND dr.freight = fr.freight
+JOIN v_policy_term t ON t.stage = s.stage AND t.direction = dr.direction;
 
 -- The gate for every (stage, freight): passes iff no term is unmet; awaiting
--- is the first unmet term; gate_since is when the wait on it began.
+-- is the first unmet term; gate_since is when the wait on it began. The rule
+-- and mode are the ones for the pair's direction.
 CREATE VIEW v_gate AS
-SELECT s.stage, fr.freight, p.mode, p.rule,
+SELECT s.stage, fr.freight, dr.direction,
+  CASE WHEN dr.direction = 'rollback' THEN coalesce(p.rollback_mode, p.mode) ELSE p.mode END AS mode,
+  CASE WHEN dr.direction = 'rollback' THEN coalesce(p.rollback_rule, p.rule) ELSE p.rule END AS rule,
   (SELECT count(*) FROM v_gate_term g WHERE g.stage = s.stage AND g.freight = fr.freight) AS n_terms,
   (SELECT count(*) FROM v_gate_term g WHERE g.stage = s.stage AND g.freight = fr.freight AND g.satisfied_at IS NULL) AS n_unmet,
   ((SELECT count(*) FROM v_gate_term g WHERE g.stage = s.stage AND g.freight = fr.freight AND g.satisfied_at IS NULL) = 0) AS passes,
@@ -546,11 +709,12 @@ SELECT s.stage, fr.freight, p.mode, p.rule,
                  ORDER BY g.idx LIMIT 1), '')) AS gate_since
 FROM v_stage s
 CROSS JOIN v_freight fr
+JOIN v_direction dr ON dr.stage = s.stage AND dr.freight = fr.freight
 JOIN v_policy p ON p.stage = s.stage;
 
 -- The gate as it applies to each stage's candidate.
 CREATE VIEW v_gate_eval AS
-SELECT g.*, c.available_at,
+SELECT g.*, c.available_at, c.source, c.requested_by, c.request_incident, c.request_fact,
        max(coalesce(c.available_at, ''), coalesce(g.gate_since, '')) AS awaiting_since
 FROM v_gate g
 JOIN v_candidate c ON c.stage = g.stage AND c.freight = g.freight;
@@ -572,6 +736,13 @@ SELECT s.ord, s.stage, s.program, s.environment, s.region, s.owner, s.url, s.ops
        lf.outcome AS last_outcome, lf.freight AS last_outcome_freight, lf.finished_at AS last_outcome_at,
        lf.error AS last_error, lf.transition AS last_transition, lf.failed_step, lf.step_url,
        ge.freight AS candidate, ge.passes, ge.awaiting, ge.awaiting_type, ge.awaiting_since,
+       ge.direction AS candidate_direction, ge.source AS candidate_source,
+       ge.requested_by, ge.request_incident, ge.request_fact,
+       -- a reversal: the latest decision moved intent to a freight older than the one before it
+       CASE WHEN pf.discovered_at > df.discovered_at THEN dd.from_freight END AS rolled_back_from,
+       CASE WHEN pf.discovered_at > df.discovered_at THEN d.decided_at END    AS rolled_back_at,
+       -- what the engine last enacted here (the latest success that ran a Pulumi update)
+       eng.freight AS engine_freight, eng.ops_update AS engine_update,
        CASE
          WHEN i.transition IS NOT NULL AND i.freight IS NOT NULL
               AND i.freight IS NOT d.freight                                        THEN 'superseded'
@@ -597,6 +768,9 @@ SELECT s.ord, s.stage, s.program, s.environment, s.region, s.owner, s.url, s.ops
        h.until_ts AS hold_until, h.holders AS hold_by, h.rationale AS hold_rationale, h.n AS holds
 FROM v_stage s
 LEFT JOIN v_desired       d  ON d.stage  = s.stage
+LEFT JOIN v_decision      dd ON dd.fact  = d.fact
+LEFT JOIN v_freight       df ON df.freight = d.freight
+LEFT JOIN v_freight       pf ON pf.freight = dd.from_freight
 LEFT JOIN v_carried       k  ON k.stage  = s.stage
 LEFT JOIN v_inflight      i  ON i.stage  = s.stage
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
@@ -604,6 +778,9 @@ LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
 LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts > coalesce(k.since, '')
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
+LEFT JOIN v_freight_transition eng ON eng.stage = s.stage AND eng.outcome = 'succeeded' AND eng.ops_update IS NOT NULL
+     AND eng.finished_seq = (SELECT max(x.finished_seq) FROM v_freight_transition x
+                             WHERE x.stage = s.stage AND x.outcome = 'succeeded' AND x.ops_update IS NOT NULL AND x.freight IS NOT NULL)
 ORDER BY s.ord;
 
 -- Freight lanes: freight × stage, long form. The renderer pivots it and
@@ -625,6 +802,8 @@ SELECT fr.freight, fr.release_pr, fr.cut_at, fr.discovered_at, s.stage, s.ord,
   CASE WHEN ge.freight = fr.freight AND ge.passes = 0 AND d.freight IS NOT fr.freight
        THEN ge.awaiting_since END AS awaiting_since,
   (k.freight IS fr.freight) AS is_current,
+  CASE WHEN k.freight IS fr.freight THEN k.since END AS current_since,
+  rv.at AS rolled_back_at, rv.to_freight AS rolled_back_to,
   (SELECT count(*) FROM v_carried_stack k2 WHERE k2.stage = s.stage AND k2.freight = fr.freight) AS n_stacks_at,
   (SELECT group_concat(x, ', ') FROM (SELECT k2.stack || '@' || k2.freight AS x FROM v_carried_stack k2
                                        WHERE k2.stage = s.stage AND k2.freight = fr.freight ORDER BY k2.stack)) AS partial_detail
@@ -632,12 +811,19 @@ FROM v_freight fr
 CROSS JOIN v_stage s
 LEFT JOIN v_gate_eval ge ON ge.stage = s.stage
 LEFT JOIN v_desired   d  ON d.stage  = s.stage
-LEFT JOIN v_carried   k  ON k.stage  = s.stage;
+LEFT JOIN v_carried   k  ON k.stage  = s.stage
+LEFT JOIN v_reversal  rv ON rv.stage = s.stage AND rv.freight = fr.freight;
 
+-- A freight the stage moved off to an older one is `rolled-back` (whether it
+-- had been carried or was still in flight); a freight the stage simply moved
+-- past stays `reached` — passing through is ordinary history.
 CREATE VIEW v_lanes AS
 SELECT b.*,
-  CASE WHEN b.reached_at IS NOT NULL      THEN 'reached'
+  CASE WHEN b.reached_at IS NOT NULL AND b.is_current THEN 'reached'
        WHEN b.inflight_since IS NOT NULL  THEN 'in-flight'
+       WHEN b.rolled_back_at IS NOT NULL
+            AND (b.reached_at IS NOT NULL OR b.last_outcome = 'abandoned') THEN 'rolled-back'
+       WHEN b.reached_at IS NOT NULL      THEN 'reached'
        WHEN b.awaiting IS NOT NULL        THEN 'awaiting'
        WHEN b.last_outcome = 'failed'     THEN 'failed'
        WHEN b.last_outcome = 'abandoned'  THEN 'superseded'
@@ -649,12 +835,14 @@ FROM v_lanes_base b;
 CREATE VIEW v_trace AS
 SELECT m.warehouse, m.pr, m.title, m.author, m.introduced_in, m.freight, fr.release_pr,
        l.stage, l.ord, l.reached_at, l.inflight_since, l.awaiting, l.awaiting_since, l.is_current,
-       l.last_outcome, l.last_outcome_at
+       l.last_outcome, l.last_outcome_at, l.rolled_back_at, l.rolled_back_to
 FROM v_membership m
 JOIN v_freight fr ON fr.freight = m.freight
 JOIN v_lanes   l  ON l.freight  = m.freight;
 
--- One cell per (PR, stage): the earliest freight that carried it there.
+-- One cell per (PR, stage): the earliest freight that carried it there, and
+-- whether the stage's current freight contains it now (membership is
+-- cumulative, so a PR is "in production" iff production's freight has it).
 CREATE VIEW v_trace_cell_base AS
 SELECT t.warehouse, t.pr, t.stage, t.ord,
        min(t.reached_at) AS reached_at,
@@ -664,14 +852,21 @@ SELECT t.warehouse, t.pr, t.stage, t.ord,
        (SELECT t2.awaiting FROM v_trace t2 WHERE t2.warehouse = t.warehouse AND t2.pr = t.pr AND t2.stage = t.stage AND t2.awaiting IS NOT NULL
           ORDER BY t2.awaiting_since, t2.freight LIMIT 1) AS awaiting,
        (SELECT t2.last_outcome FROM v_trace t2 WHERE t2.warehouse = t.warehouse AND t2.pr = t.pr AND t2.stage = t.stage AND t2.last_outcome IS NOT NULL
-          ORDER BY t2.last_outcome_at DESC, t2.freight DESC LIMIT 1) AS last_outcome
+          ORDER BY t2.last_outcome_at DESC, t2.freight DESC LIMIT 1) AS last_outcome,
+       max(t.is_current) AS is_current,
+       max(t.rolled_back_at) AS rolled_back_at,
+       (SELECT t2.rolled_back_to FROM v_trace t2 WHERE t2.warehouse = t.warehouse AND t2.pr = t.pr AND t2.stage = t.stage AND t2.rolled_back_at IS NOT NULL
+          ORDER BY t2.rolled_back_at DESC LIMIT 1) AS rolled_back_to
 FROM v_trace t
 GROUP BY t.warehouse, t.pr, t.stage;
 
 CREATE VIEW v_trace_cell AS
 SELECT b.*,
-  CASE WHEN b.reached_at IS NOT NULL      THEN 'reached'
+  CASE WHEN b.reached_at IS NOT NULL AND b.is_current THEN 'reached'
        WHEN b.inflight_since IS NOT NULL  THEN 'in-flight'
+       WHEN b.rolled_back_at IS NOT NULL AND NOT b.is_current
+            AND (b.reached_at IS NOT NULL OR b.last_outcome = 'abandoned') THEN 'rolled-back'
+       WHEN b.reached_at IS NOT NULL      THEN 'reached'
        WHEN b.awaiting IS NOT NULL        THEN 'awaiting'
        WHEN b.last_outcome = 'failed'     THEN 'failed'
        WHEN b.last_outcome = 'abandoned'  THEN 'superseded'
@@ -694,7 +889,11 @@ SELECT t.warehouse, t.pr, t.title, t.author, t.introduced_in,
   CASE WHEN EXISTS (SELECT 1 FROM v_freight fr2 WHERE fr2.warehouse = t.warehouse AND fr2.cut_at IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM v_freight fr JOIN v_membership m2 ON m2.freight = fr.freight
                          WHERE m2.warehouse = t.warehouse AND m2.pr = t.pr AND fr.cut_at IS NOT NULL)
-       THEN 'not in a release yet (next cut picks it up)' END AS note
+       THEN 'not in a release yet (next cut picks it up)' END AS note,
+  -- stages that carried this change and then rolled back off it
+  (SELECT group_concat(c.stage || ' (' || c.rolled_back_at || ', to ' || c.rolled_back_to || ')', '; ')
+     FROM (SELECT c.stage, c.rolled_back_at, c.rolled_back_to FROM v_trace_cell c
+            WHERE c.warehouse = t.warehouse AND c.pr = t.pr AND c.cell = 'rolled-back' ORDER BY c.ord) c) AS rolled_back_from
 FROM v_trace t
 GROUP BY t.warehouse, t.pr;
 
@@ -913,6 +1112,7 @@ SELECT p.edge, p.key, p.published_version, p.pinned_in, s.stage, s.environment, 
        k.freight                                    AS carried,
        json_extract(fr.config, '$.' || p.key)       AS carried_pin,
        l.cell, l.reached_at, l.awaiting, l.awaiting_since, l.inflight_since, l.last_outcome, l.last_outcome_at, l.is_current,
+       l.current_since, l.rolled_back_at, l.rolled_back_to,
        CASE WHEN p.published_version IS NULL                                        THEN 'nothing'
             WHEN json_extract(fr.config, '$.' || p.key) = p.published_version       THEN 'current'
             WHEN p.pinned_in IS NULL                                                THEN 'unpinned'
@@ -968,7 +1168,8 @@ CREATE VIEW v_pinset_env AS
 SELECT m.release, m.program, m.freight, s.environment, s.stage, s.ord,
        (k.freight IS m.freight)                     AS carried_now,
        (d.freight IS m.freight)                     AS desired_now,
-       l.cell, l.reached_at, l.awaiting, l.awaiting_since, l.inflight_since, l.last_outcome, l.last_outcome_at, l.is_current
+       l.cell, l.reached_at, l.awaiting, l.awaiting_since, l.inflight_since, l.last_outcome, l.last_outcome_at, l.is_current,
+       l.current_since, l.rolled_back_at, l.rolled_back_to
 FROM v_pinset_member m
 JOIN v_stage s ON s.program = m.program
 LEFT JOIN v_lanes   l ON l.freight = m.freight AND l.stage = s.stage
@@ -1012,7 +1213,7 @@ ORDER BY fr.cut_at DESC;
 
 CREATE VIEW v_release_stage AS
 SELECT fr.freight, s.stage, s.ord, l.reached_at, l.cell, l.awaiting, l.awaiting_since, l.inflight_since,
-       l.last_outcome, l.last_outcome_at, l.is_current,
+       l.last_outcome, l.last_outcome_at, l.is_current, l.current_since, l.rolled_back_at, l.rolled_back_to,
        (SELECT a.actor FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight ORDER BY a.seq DESC LIMIT 1) AS approved_by,
        (SELECT a.ts    FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight ORDER BY a.seq DESC LIMIT 1) AS approved_at,
        EXISTS (SELECT 1 FROM v_policy_term t WHERE t.stage = s.stage AND t.type IN ('approved', 'plan_safe_or_approved')) AS approvable
@@ -1026,43 +1227,64 @@ WHERE fr.cut_at IS NOT NULL;
 -- or unevidenced decision stays distinguishable from a legitimate one.
 --
 -- The approval-bearing terms (approved, plan_safe_or_approved) are checked
--- as of the decision's own timestamp — was the approval, or a safe plan, on
--- record when the decision was written? The other terms (verified, carried,
--- not_held) are replayed by render.py's per-decision check; expressing them
--- as-of-T in SQL wants every "latest" view parameterised by T (smells.md).
+-- as of the decision's own timestamp — was a still-valid approval, or a
+-- still-current safe plan, on record when the decision was written? — in the
+-- direction the decision had at that instant. The other terms (verified,
+-- carried, not_held, previously_carried) are replayed by render.py's
+-- per-decision check; expressing them as-of-T in SQL wants every "latest"
+-- view parameterised by T (smells.md).
+CREATE VIEW v_audit_ctx AS
+SELECT d.fact AS decision, d.stage, d.freight, d.ts, d.seq, d.actor,
+       -- the incumbent when the decision was written: the latest successful
+       -- freight enactment on the stage at or before then
+       inc.freight AS incumbent,
+       CASE WHEN inc.discovered_at IS NOT NULL AND f.discovered_at < inc.discovered_at THEN 'rollback' ELSE 'forward' END AS direction,
+       -- when intent had last moved off this freight, as of the decision
+       (SELECT max(o.ts) FROM v_decision o
+         WHERE o.stage = d.stage AND o.freight <> d.freight AND o.seq < d.seq
+           AND o.seq > (SELECT min(p.seq) FROM v_decision p WHERE p.stage = d.stage AND p.freight = d.freight)) AS moved_at
+FROM v_decision d
+JOIN v_freight f ON f.freight = d.freight
+LEFT JOIN v_freight inc ON inc.freight = (SELECT o.freight FROM v_freight_transition o
+                                           WHERE o.stage = d.stage AND o.outcome = 'succeeded' AND o.freight IS NOT NULL
+                                             AND o.finished_at <= d.ts ORDER BY o.finished_seq DESC LIMIT 1);
+
 CREATE VIEW v_audit_term AS
-SELECT d.id AS decision, substr(d.subject, 7) AS stage, json_extract(d.payload, '$.freight') AS freight, d.ts,
-       t.idx, t.type, t.role,
+SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
   CASE t.type
     WHEN 'approved' THEN
       (SELECT a.fact FROM v_approval a
-        WHERE a.stage = substr(d.subject, 7) AND a.freight = json_extract(d.payload, '$.freight')
-          AND a.role = t.role AND a.ts <= d.ts ORDER BY a.seq DESC LIMIT 1)
+        WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
+          AND a.ts <= c.ts AND a.ts >= coalesce(c.moved_at, '') ORDER BY a.seq DESC LIMIT 1)
     WHEN 'plan_safe_or_approved' THEN
       coalesce(
-        -- the latest plan on record at decision time, if it was safe
+        -- the latest plan on record at decision time, if it was safe and still
+        -- current (no other freight had been carried since it was computed)
         (SELECT CASE WHEN json_extract(p.payload, '$.delete') = 0 AND json_extract(p.payload, '$.replace') = 0
                           AND NOT json_extract(p.payload, '$.migrations_changed') THEN p.id END
            FROM facts p
-          WHERE p.kind = 'plan.summarized' AND p.subject = d.subject
+          WHERE p.kind = 'plan.summarized' AND p.subject = 'stage:' || c.stage
             AND json_extract(p.payload, '$.against_record') IS NULL
-            AND json_extract(p.payload, '$.freight') = json_extract(d.payload, '$.freight') AND p.ts <= d.ts
+            AND json_extract(p.payload, '$.freight') = c.freight AND p.ts <= c.ts
+            AND NOT EXISTS (SELECT 1 FROM v_freight_transition o
+                             WHERE o.stage = c.stage AND o.outcome = 'succeeded' AND o.freight IS NOT NULL
+                               AND o.freight <> c.freight AND o.finished_at > p.ts AND o.finished_at <= c.ts)
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
-          WHERE a.stage = substr(d.subject, 7) AND a.freight = json_extract(d.payload, '$.freight')
-            AND a.role = t.role AND a.ts <= d.ts ORDER BY a.seq DESC LIMIT 1))
+          WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
+            AND a.ts <= c.ts AND a.ts >= coalesce(c.moved_at, '') ORDER BY a.seq DESC LIMIT 1))
   END AS satisfied_by,
   CASE t.type WHEN 'approved' THEN 'approval: ' || t.role ELSE 'safe plan or approval: ' || t.role END AS requirement
-FROM facts d
-JOIN v_policy_term t ON t.stage = substr(d.subject, 7) AND t.type IN ('approved', 'plan_safe_or_approved')
-WHERE d.kind = 'promotion.decided';
+FROM v_audit_ctx c
+JOIN v_policy_term t ON t.stage = c.stage AND t.direction = c.direction AND t.type IN ('approved', 'plan_safe_or_approved');
 
 CREATE VIEW v_audit_decision AS
 SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.freight')         AS freight,
        f.ts, f.actor, f.rationale, f.id AS fact,
        json_array_length(f.refs)                    AS n_refs,
-       p.mode,
+       c.direction, c.incumbent,
+       CASE WHEN c.direction = 'rollback' THEN coalesce(p.rollback_mode, p.mode) ELSE p.mode END AS mode,
        (SELECT count(*) FROM v_audit_term x WHERE x.decision = f.id)                              AS n_required,
        (SELECT count(*) FROM v_audit_term x WHERE x.decision = f.id AND x.satisfied_by IS NULL)   AS n_unmet,
        (SELECT group_concat(x.requirement, '; ') FROM v_audit_term x
@@ -1071,6 +1293,7 @@ SELECT substr(f.subject, 7)                         AS stage,
          WHERE x.decision = f.id AND x.satisfied_by IS NOT NULL)                                  AS evidence
 FROM facts f
 JOIN v_policy p ON p.stage = substr(f.subject, 7)
+JOIN v_audit_ctx c ON c.decision = f.id
 WHERE f.kind = 'promotion.decided';
 
 CREATE VIEW v_audit_flag AS

@@ -65,6 +65,13 @@ def plan_safe_or_approved(role):
     return {"type": "plan_safe_or_approved", "role": role}
 
 
+def previously_carried(within_hours=None):
+    t = {"type": "previously_carried"}
+    if within_hours:
+        t["within_hours"] = within_hours
+    return t
+
+
 def rule_text(stage, terms):
     parts = []
     for t in terms:
@@ -79,6 +86,8 @@ def rule_text(stage, terms):
             parts.append(f"NOT held({stage})")
         elif k == "plan_safe_or_approved":
             parts.append(f"(plan({stage}, F).safe OR approved({stage}, F, role = '{t['role']}'))")
+        elif k == "previously_carried":
+            parts.append(f"carried_before({stage}, F" + (f", within {t['within_hours']}h)" if t.get("within_hours") else ")"))
     return " AND ".join(parts) or "true"
 
 
@@ -131,10 +140,26 @@ POLICIES = [
      "EU follows US automatically when the plan is boring. A migration or a destructive step requires oncall. "
      "(Proposed: today EU deploys in parallel with US.)"),
 ]
+# The rollback direction, where a stage declares one: a promotion to a freight
+# older than what the stage carries is gated by these terms instead. This is
+# cmd/prod-rollback's own checks written as policy — the 120h task-definition
+# lookback and the migration-safety check — with "oncall confirms" as the
+# approval. A stage without a block gates a rollback with its ordinary terms.
+ROLLBACK = {
+    "production": ("auto-if-safe", "rollback.requested",
+                   [previously_carried(120), not_held(), plan_safe_or_approved("oncall")],
+                   "cmd/prod-rollback, codified: the target must be a task definition this stage ran within the 120h lookback; "
+                   "if migrations/ changed between the target and what runs now, oncall must confirm; otherwise it just goes. "
+                   "Today the tool runs these checks and a person decides; here the checks are the policy's terms."),
+}
 for i, (name, mode, trigger, terms, desc) in enumerate(POLICIES):
     p = {"mode": mode, "terms": terms, "rule": rule_text(name, terms), "description": desc}
     if trigger:
         p["trigger"] = trigger
+    if name in ROLLBACK:
+        rmode, rtrigger, rterms, rdesc = ROLLBACK[name]
+        p["rollback"] = {"mode": rmode, "trigger": rtrigger, "terms": rterms, "rule": rule_text(name, rterms), "description": rdesc}
+        terms = terms + rterms
     if any(t["type"] == "plan_safe_or_approved" for t in terms):
         p["safe"] = SAFE_RULE
     intent(T(12, f"15:00:{10 + i:02d}"), "policy.declared", f"stage:{name}", "user:priya", p)
@@ -180,27 +205,32 @@ def decide(ts, stage, freight, actor, rationale, refs=()):
     return intent(ts, "promotion.decided", f"stage:{stage}", actor, {"freight": freight}, rationale, refs)
 
 
-def started(ts, tid, stage, freight, run, refs=(), stack="service", **extra):
+def started(ts, tid, stage, freight, run, refs=(), stack="service", actor="ci:gha", **extra):
     p = dict({"stage": stage, "freight": freight, "stack": stack, "run": run}, **extra)
-    return observe(ts, "transition.started", f"transition:{tid}", "ci:gha", p, refs=refs)
+    return observe(ts, "transition.started", f"transition:{tid}", actor, p, refs=refs)
 
 
-def finished(ts, tid, outcome, ops_update=None, summary=None, refs=(), **extra):
+def finished(ts, tid, outcome, ops_update=None, summary=None, refs=(), actor="ci:gha", **extra):
     p = {"outcome": outcome}
     if ops_update is not None:
         p["ops_update"] = ops_update
     if summary is not None:
         p["summary"] = dict(zip(("create", "update", "delete", "replace"), summary))
     p.update(extra)
-    return observe(ts, "transition.finished", f"transition:{tid}", "ci:gha", p, refs=refs)
+    return observe(ts, "transition.finished", f"transition:{tid}", actor, p, refs=refs)
 
 
 def phase(ts, tid, name, detail):
     return observe(ts, "transition.phase", f"transition:{tid}", "ci:gha", {"phase": name, "detail": detail})
 
 
-def step(ts, tid, op, typ, urn, **extra):
-    return observe(ts, "resource.step", f"transition:{tid}", "ci:gha", dict({"op": op, "type": typ, "urn": urn}, **extra))
+def step(ts, tid, op, typ, urn, actor="ci:gha", **extra):
+    return observe(ts, "resource.step", f"transition:{tid}", actor, dict({"op": op, "type": typ, "urn": urn}, **extra))
+
+
+def rollback_request(ts, stage, freight, actor, incident, via, rationale, refs=()):
+    """A person nominates a freight the stage carried before — the trigger for the rollback direction."""
+    return intent(ts, "rollback.requested", f"stage:{stage}", actor, {"freight": freight, "incident": incident, "via": via}, rationale, refs)
 
 
 def verify(ts, stage, freight, check, outcome, detail, actor="ci:gha", run=None):
@@ -210,7 +240,7 @@ def verify(ts, stage, freight, check, outcome, detail, actor="ci:gha", run=None)
     return observe(ts, "verification.recorded", f"stage:{stage}", actor, p)
 
 
-def plan(ts, stage, freight, against, counts, migrations=None, run=None, note=None):
+def plan(ts, stage, freight, against, counts, migrations=None, run=None, note=None, actor="ci:gha"):
     p = {"freight": freight, "against": against}
     p.update(dict(zip(("create", "update", "delete", "replace"), counts)))
     p["migrations_changed"] = bool(migrations)
@@ -220,7 +250,7 @@ def plan(ts, stage, freight, against, counts, migrations=None, run=None, note=No
         p["run"] = run
     if note:
         p["note"] = note
-    return observe(ts, "plan.summarized", f"stage:{stage}", "ci:gha", p)
+    return observe(ts, "plan.summarized", f"stage:{stage}", actor, p)
 
 
 def approve(ts, stage, freight, actor, via, rationale, refs=()):
@@ -388,13 +418,13 @@ step(T(26, "15:06:00"), "F418-staging", "update", "aws:ecs/service:Service", "ur
 step(T(26, "15:12:00"), "F418-staging", "update", "aws:ecs/service:Service", "urn:pulumi:staging::pulumi-service::aws:ecs/service:Service::console")
 finished(T(26, "15:17:00"), "F418-staging", "succeeded", 1421, (5, 12, 0, 0))
 job(T(26, "15:18:00"), "staging", "F418", "sentry-release", "succeeded", "release marked in Sentry")
-verify(T(26, "15:29:00"), "staging", "F418", "integration-tests", "pass", "412 tests, 0 failures", run="gha:pr-staging-deploy/7841")
-verify(T(26, "15:31:00"), "staging", "F418", "smoke", "pass", "deploy-smoke-test green", run="gha:deploy-smoke-test/2244")
-verify(T(26, "15:35:00"), "staging", "F418", "load-generator", "pass", "100% success over 10m", actor="watch:load-generator")
+v418a = verify(T(26, "15:29:00"), "staging", "F418", "integration-tests", "pass", "412 tests, 0 failures", run="gha:pr-staging-deploy/7841")
+v418b = verify(T(26, "15:31:00"), "staging", "F418", "smoke", "pass", "deploy-smoke-test green", run="gha:deploy-smoke-test/2244")
+v418c = verify(T(26, "15:35:00"), "staging", "F418", "load-generator", "pass", "100% success over 10m", actor="watch:load-generator")
 plan(T(26, "15:36:00"), "production", "F418", "world@2026-08-26T15:36Z (api at F416 task def, rest at F417)", (2, 14, 0, 0),
      migrations=["20260825_stack_tags_index.sql"], run="gha:pr-staging-deploy/7841")
-plan(T(26, "15:40:00"), "production-eu", "F418", "F417", (2, 14, 0, 0), migrations=["20260825_stack_tags_index.sql"],
-     run="gha:pr-staging-deploy/7841", note="computed ahead of candidacy: the gate is evaluable at rest")
+pl418eu = plan(T(26, "15:40:00"), "production-eu", "F418", "F417", (2, 14, 0, 0), migrations=["20260825_stack_tags_index.sql"],
+               run="gha:pr-staging-deploy/7841", note="computed ahead of candidacy: the gate is evaluable at rest")
 
 # --- Wednesday afternoon on master: a failure, then a supersession -----------------
 IMG419 = dict(IMG418, console="sha256:4c1d90")
@@ -424,6 +454,63 @@ observed(T(26, "17:30:10"), "production-eu", {"api": "F417", "console": "F417", 
 
 # F420's enactments start at 16:21:30 / 16:21:35 (master_push), after the abandonment above, so testing never
 # has two transitions in flight at once.
+
+# --- Thursday: F418 ships to both regions; then a rollback by the front door ----------
+# Oncall merges the release PR in the morning; production and, after the plan's
+# migration is confirmed, production-eu carry F418. The api break-glass expires
+# with the promotion, as it said it would.
+a418 = approve(T(27, "08:55:00"), "production", "F418", "user:maya", "merged release PR #14882",
+               "staging clean overnight; the stack-tags index migration is additive", [v418a, v418b, v418c])
+p418 = decide(T(27, "08:55:05"), "production", "F418", "policy:production",
+              "gate satisfied: verified in staging (integration, smoke, load-generator) and approved by oncall", [a418, v418a, v418b, v418c])
+started(T(27, "08:56:00"), "F418-prod", "production", "F418", "gha:push-build/7860", [p418], strategy="ecs-rolling (create before delete)")
+f418p = finished(T(27, "09:20:00"), "F418-prod", "succeeded", 3199, (2, 14, 0, 0))
+job(T(27, "09:21:00"), "production", "F418", "sentry-release", "succeeded", "release marked in Sentry")
+v418p = verify(T(27, "09:33:00"), "production", "F418", "integration-tests", "pass", "412 tests, 0 failures", run="gha:push-build/7860")
+observed(T(27, "09:35:00"), "production", {"api": "F418", "console": "F418", "jobs": "F418", "ratelimit": "F418", "workflow": "F418"})
+a418eu = approve(T(27, "09:40:00"), "production-eu", "F418", "user:maya", "pulumi delivery approve production-eu F418",
+                 "plan not auto-safe (index migration); the index is additive and US has been healthy for 20m", [pl418eu, v418p])
+e418 = decide(T(27, "09:40:05"), "production-eu", "F418", "policy:production-eu",
+              "gate satisfied: production carries and verified F418; plan not safe, oncall approved", [f418p, v418p, pl418eu, a418eu])
+started(T(27, "09:41:00"), "F418-prod-eu", "production-eu", "F418", "gha:push-build/7860", [e418])
+finished(T(27, "09:58:00"), "F418-prod-eu", "succeeded", 2088, (2, 14, 0, 0))
+verify(T(27, "10:10:00"), "production-eu", "F418", "integration-tests", "pass", "412 tests, 0 failures", run="gha:push-build/7860")
+observed(T(27, "10:15:00"), "production-eu", {"api": "F418", "console": "F418", "jobs": "F418", "ratelimit": "F418", "workflow": "F418"})
+
+# INC-2318, late morning: the indexed stack-tags lookup from #46170 truncates for
+# large orgs. Oncall runs cmd/prod-rollback against F417's SHA for US only. The
+# request nominates F417 the way a release cut nominates a freight; the tool's
+# migration-safety check lands as a backward plan fact; its "blocked — confirm?"
+# is the approval term of the rollback direction.
+rq417 = rollback_request(T(27, "10:52:00"), "production", "F417", "user:maya", "INC-2318", "prod-rollback --region us 7c9e2b4",
+                         "INC-2318: stack tags missing in the console for orgs with more than 1000 tags since 09:20 — the indexed "
+                         "lookup path from #46170 truncates. Roll US back to F417; that re-exposes the rate-limit collision #46173 "
+                         "fixed, so the api break-glass stays on the table if INC-2311 recurs. EU has not reported; leave EU on F418 "
+                         "until we know.", [f418p, v418p])
+pl_rb = plan(T(27, "10:53:00"), "production", "F417", "F418", (0, 5, 0, 0), migrations=["20260825_stack_tags_index.sql"],
+             actor="cli:prod-rollback",
+             note="prod-rollback migration safety check: migrations/ changed between 7c9e2b4..a1b2c3d — rollback blocked without explicit confirmation")
+a_rb = approve(T(27, "11:05:00"), "production", "F417", "user:maya", "prod-rollback: confirmed proceed past the migration check",
+               "the index migration is additive (CREATE INDEX only) and F417's code never reads it — F417 is safe against the F418 schema",
+               [rq417, pl_rb])
+d_rb = decide(T(27, "11:05:05"), "production", "F417", "policy:production",
+              "rollback gate satisfied: production carried F417 within 120h; no hold; plan not safe (migration) and oncall confirmed",
+              [rq417, pl_rb, a_rb])
+started(T(27, "11:06:00"), "F417-prod-rollback", "production", "F417", "prod-rollback@maya 2026-08-27T11:06Z", [d_rb],
+        strategy="ecs UpdateService to the F417 task definitions (prod-rollback); no Pulumi update", actor="cli:prod-rollback")
+for i, svc in enumerate(["api", "console", "jobs", "ratelimit", "workflow"]):
+    step(T(27, f"11:{7 + i:02d}:00"), "F417-prod-rollback", "update", "aws:ecs/service:Service",
+         f"arn:aws:ecs:us-west-2:058607598222:service/production-5b8f0556/{svc}", actor="cli:prod-rollback",
+         detail=f"task definition → {svc} revision tagged SHA=7c9e2b4 (F417)")
+f_rb = finished(T(27, "11:14:00"), "F417-prod-rollback", "succeeded", None, (0, 5, 0, 0), actor="cli:prod-rollback",
+                detail="5 services updated in place; Pulumi state untouched — it still describes the F418 task definitions")
+observed(T(27, "11:20:00"), "production", {"api": "F417", "console": "F417", "jobs": "F417", "ratelimit": "F417", "workflow": "F417"})
+# EU follows production, so production carrying F417 again makes F417 EU's
+# candidate — in the rollback direction, under EU's ordinary follower terms.
+# The Monday plan and approval for F417 are stale (EU has carried F418 since);
+# the planner recomputes, and the migration puts the decision back on oncall.
+plan(T(27, "11:30:00"), "production-eu", "F417", "F418", (0, 5, 0, 0), migrations=["20260825_stack_tags_index.sql"],
+     run="gha:plan/7871", note="computed on candidacy: production carries F417 again")
 
 
 # ---------------------------------------------------------------------------
