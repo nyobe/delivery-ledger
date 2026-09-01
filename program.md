@@ -7,7 +7,7 @@ list: the existing prototypes (Joe's `Stack`/`Stage`/`Gate`/`Job`, Vic's
 describe *runs*. This describes the **standing subjects** — the things facts
 accumulate on — and the emit contract between a program, the operations
 people perform, and the executors that do the work. Syntax is placeholder;
-the mapping table is the point.
+the mapping table is the point, and `fixture.py` is its executable twin.
 
 ## One program for pulumi-service
 
@@ -34,7 +34,7 @@ export default d.program("pulumi-service", {
     "testing-eu":    d.stage({ region: "eu-central-1", upstream: "warehouse",
                                promote: d.auto() }),
     "staging":       d.stage({ region: "us-west-2",    upstream: d.releaseTrain(),
-                               promote: d.auto({ requires: [d.verified("testing", "integration-tests")] }),
+                               promote: d.auto(),      // the PR opening is the trigger; no precondition today
                                annotate: { url: "https://app.pulumi-staging.io", slack: "#ops-notif-staging" } }),
     "production":    d.stage({ region: "us-west-2",    upstream: "staging",
                                promote: d.gated({
@@ -44,9 +44,11 @@ export default d.program("pulumi-service", {
                                             d.approved({ role: "oncall", via: d.releasePrMerge() })],
                                }),
                                annotate: { url: "https://app.pulumi.com", slack: "#ops-alerts" } }),
-    "production-eu": d.stage({ region: "eu-central-1", upstream: "production",
+    "production-eu": d.stage({ region: "eu-central-1", upstream: "production",   // proposed: today EU runs in parallel
                                promote: d.autoIfSafe({
-                                 requires: [d.verified("production", "integration-tests")],
+                                 requires: [d.carried("production"),
+                                            d.verified("production", "integration-tests"),
+                                            d.notHeld()],
                                  safe:     d.plan(p => p.delete == 0 && p.replace == 0 && !p.migrationsChanged),
                                  else:     d.approved({ role: "oncall" }),
                                }) }),
@@ -57,7 +59,7 @@ export default d.program("pulumi-service", {
 
   // Verifications write onto the (stage, freight) pair, not nodes into a workflow.
   verify: {
-    "integration-tests": d.watch.githubWorkflow("integration-tests.yml"),
+    "integration-tests": d.watch.githubWorkflow("integration-tests"),
     "smoke":             d.watch.githubWorkflow("deploy-smoke-test.yml"),
     "load-generator":    d.watch.http("…/load-generator/status", ok: r => r.success == 1.0, window: "10m"),
   },
@@ -68,6 +70,8 @@ export default d.program("pulumi-service", {
              from: d.outputs("workflow-ami@production"),    uptake: "gated" }),
     d.bind({ consumer: "workflow-pool@production-eu", key: "ami_id",
              from: d.outputs("workflow-ami@production-eu"), uptake: "gated" }),
+    d.bind({ consumer: "workflow-pool@production",    key: "deploy_image_reference",
+             from: d.outputs("service@production"),         uptake: "auto" }),
   ],
 });
 ```
@@ -75,32 +79,48 @@ export default d.program("pulumi-service", {
 Nothing in this program is a step body. The order of stages is not the
 order they're written in; it's the `upstream` declarations. There is no loop
 for blue/green and no `if` for the migration check — the rollout strategy
-belongs to the enactment, and the check is a predicate over a plan fact.
+belongs to the enactment, and the check is a term over a plan fact.
+
+`requires:` is emitted as **structured terms**, not text: the policy fact
+carries `terms: [{type: "verified", stage, check}, {type: "approved",
+role}, …]` and the ledger's gate view evaluates them by joining the facts
+each term names. The five term types in use — `verified`, `carried`,
+`approved`, `not_held`, `plan_safe_or_approved` — are the vocabulary a gate
+language needs first.
 
 ## What writes what
 
 | who | when | writes (class · kind · subject) |
 |---|---|---|
-| **program apply** | `pulumi up` on the delivery program (a re-apply that changes nothing writes nothing) | intent · `stage.declared` · `stage:<s>` — with the annotations as payload (view configuration: URLs, owner, Slack) |
-| | | intent · `policy.declared` · `stage:<s>` — mode + rule text |
-| | | intent · `binding.declared` · `edge:<consumer><-<producer>.<key>` |
-| **warehouse** | a master build completes | observation · `freight.discovered` · `freight:<F>` — digests, config version, source SHA, PR membership |
-| **release cron / button** | 09:00 weekdays, or "Cut release" | intent · `release.cut` · `freight:<F>` — the train nominates a freight; `armed_by` names the person |
-| **policy engine** | on any fact that could satisfy a stage's rule | intent · `promotion.decided` · `stage:<s>` — actor `policy:<s>`, `refs` = the facts that satisfied the rule |
+| **program apply** | `pulumi up` on the delivery program (a re-apply that changes nothing writes nothing) | intent · `warehouse.declared` · `warehouse:<name>` |
+| | | intent · `stage.declared` · `stage:<s>` — with the annotations as payload (view configuration: URLs, owner, Slack) |
+| | | intent · `policy.declared` · `stage:<s>` — mode, trigger, structured `terms`, and the rule rendered from them |
+| | | intent · `binding.declared` · `edge:<consumer><-<producer>.<key>` — with its uptake policy |
+| **warehouse** | a master build completes | observation · `freight.discovered` · `freight:<F>` — digests, config version, source SHA, the PRs this build introduced |
+| **release cron / button** | 15:00 UTC weekdays, or "Cut release" | intent · `release.cut` · `freight:<F>` — the train nominates a freight |
+| **policy engine** | on any fact that could satisfy a stage's terms, or its trigger | intent · `promotion.decided` · `stage:<s>` — actor `policy:<s>`, `refs` = the facts that satisfied the terms |
+| | on a publication, where the binding says auto | intent · `uptake.decided` · `edge:<…>` — actor `policy:uptake` |
 | **a person** | merges the release PR / runs `delivery approve` | intent · `approval.granted` · `stage:<s>` — role, via, rationale |
 | **a person** | `delivery hold production-eu --until …` | intent · `hold.placed` · `stage:<s>` — expiry in payload |
 | **a person, side door** | does something out of band and says so | intent · `breakglass.recorded` · `stage:<s>` — scope, action, from/to, incident, expiry |
-| **a person** | takes up a published record | intent · `uptake.decided` · `edge:<…>` — record version |
-| **executor** | starts / progresses / finishes an enactment | observation · `transition.started` / `.phase` / `.finished` · `transition:<T>`; `resource.step` at whatever grain the executor emits |
+| **a person** | takes up a published record on a gated edge | intent · `uptake.decided` · `edge:<…>` — record version |
+| **executor** | starts / progresses / finishes an enactment | observation · `transition.started` / `.phase` / `.finished` · `transition:<T>` — outcome `succeeded`, `failed` (with step and error), or `abandoned` (refs the superseding decision); `resource.step` at whatever grain the executor emits |
 | **verification watch** | an external check concludes | observation · `verification.recorded` · `stage:<s>` — freight, check, outcome |
 | **planner** | a preview runs (on candidacy, or ahead of it) | observation · `plan.summarized` · `stage:<s>` — counts, migrations touched, baseline |
 | **producer enactment** | a stack publishes outputs | observation · `output.published` · `record:<producer>` — versioned |
 | **conformance watch** | on cadence | observation · `state.observed` · `stage:<s>` — what is actually running |
-| **side jobs** | sentry marker, PR notifications | observation · `job.finished` · `stage:<s>` — with `optional` |
+| **side jobs** | sentry marker, PR notifications | observation · `job.finished` · `stage:<s>` — with `optional` (see smells.md: that flag is really the program's to declare) |
 
 Two doors, one destination: the merge that approves and the ECS console
 click that rolls back both land as intent facts with an actor and a reason.
-That is what lets the grid explain drift instead of fighting it.
+That is what lets the grid explain drift instead of fighting it — and what
+lets the decision audit tell a policy-written promotion from one a person
+typed in.
+
+Declarations that write no fact in this slice: `enact:` and `verify:`.
+Their content shows up only through what executors and watches later
+observe; whether the *declaration* of an executor or a check deserves a
+subject of its own is open.
 
 ## What annotations are
 
@@ -115,8 +135,8 @@ has nothing to link to.
 Tyler's orchestration POC and Florian's request-and-yield pump sit in the
 `enact:` slot and the policy engine's slot: they decide *when* to run and
 *run* things. Their emit contract is the observation rows above
-(`transition.*`, `verification.recorded`, `plan.summarized`). If their runs
-write those rows, this tracker renders them unchanged. The intent rows come
-from people and policies, not from executors — that boundary is the
-publication ≠ uptake discipline, and it's what keeps evidence from quietly
-becoming normative.
+(`transition.*`, `verification.recorded`, `plan.summarized`,
+`output.published`). If their runs write those rows, this tracker renders
+them unchanged. The intent rows come from people and policies, not from
+executors — that boundary is the publication ≠ uptake discipline, and it's
+what keeps evidence from quietly becoming normative.

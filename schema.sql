@@ -17,8 +17,8 @@ CREATE TABLE facts (
   refs      TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(refs))  -- fact ids this one answers to
 );
 
-CREATE INDEX facts_subject ON facts (subject, ts);
-CREATE INDEX facts_kind    ON facts (kind, ts);
+CREATE INDEX facts_subject      ON facts (subject, seq);
+CREATE INDEX facts_kind_subject ON facts (kind, subject, seq);
 
 -- The only non-ledger state: what time it is. Views that ask "active now?"
 -- (holds) read it. The renderer sets it so the fixture renders the same at any
