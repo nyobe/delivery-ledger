@@ -96,10 +96,57 @@ What the slice taught, honestly:
     the schema can forbid it, and nothing should — the side door depends on
     that. What the ledger owes is a *query* that distinguishes it:
     `v_audit_flag` checks every decision against the policy that should
-    have written it (actor is the stage policy; required approval on
-    record at decision time; evidence cited). Two mutation checks pin it,
-    and the fixture-level check that every policy decision passed its gate
-    at its own timestamp is the same idea run against history.
+    have written it — actor is the stage policy; every approval-bearing
+    term (`approved`, and the approval half of `plan_safe_or_approved`)
+    was met on record at decision time; evidence cited. The second
+    verification pass caught the first version reading only `approved`
+    terms, which left production-eu unauditable and a second approval
+    role invisible; `v_audit_term` now iterates the terms. Four mutation
+    checks pin it.
+
+15. **"As of T" is only half-expressible in SQL here.** The audit checks
+    approval-bearing terms at decision time because those reduce to
+    "was a fact with `ts <= T` on record". The other terms — verified,
+    carried, not-held — depend on "latest" views (`v_carried`,
+    `v_verified`, `v_hold_active`) that are latest *as of the clock*, not
+    as of an arbitrary T. Replaying the whole gate at decision time is
+    done by `render.py` (rebuild the ledger prefix at each policy
+    decision's own timestamp), not by a view. A ledger that wants to
+    answer "did this gate pass when it was decided?" *as a query* needs
+    its per-subject state parameterised by T — bitemporal views, or a
+    clock per row. Real design point for ledger residence (OPEN 5): the
+    engine's journal already is a prefix-replayable log; a status store
+    is not.
+
+16. **The pending-uptake preview is a string, not a fact.** `v_pending_uptake.preview`
+    concatenates "preview consumer with key = value". The honest artefact is a
+    `plan.summarized` for the consumer against the proposed record —
+    Moderna's hyper-preview — which would make the uptake gate evaluable
+    at rest exactly as the diff-gate is. Not built; it is the multi-stack
+    scenario's first fact.
+
+17. **Two kinds of binding, and the fixture drew the wrong one for the
+    AMI.** Claire's read of the real mechanism (2026-09-01): the bake runs
+    periodically; when it finishes it opens a PR that pins the new AMI
+    version into pulumi-service's config — the PR is the gate — and the
+    program derives the default deployment image from the AMI's tag. One
+    refinement from the workflow file: the bake enables auto-merge on that
+    PR (`update-workflow-ami.yml:99`, `gh pr merge --squash --auto`), so
+    the gate is the PR's required checks rather than a person. So the AMI
+    is a **by-version** binding whose uptake is a config change inside the
+    freight boundary, taken up automatically on green CI: it rides the
+    release train and meets every stage's gate on the way. The fixture's `workflow-pool@production ←
+    workflow-ami@production.ami_id` is a **by-reference**, per-stage
+    binding with its own gated uptake — the other legitimate kind (P4:
+    by-version vs by-reference is an explicit per-edge choice), but not
+    today's. The image-reference edge is probably not a separate edge
+    either: the API advertises a value the same program derived from the
+    same config. In the ledger the faithful shape is `output.published`
+    (bake) → `uptake.decided` by the PR merge → `freight.discovered` whose
+    config pins the version → ordinary lanes; "pending" = published but in
+    no freight yet, and "where is ami v13" is a trace question. Bindings
+    are the multi-stack scenario's core; model both kinds there, side by
+    side.
 
 12. **Latest-wins is by arrival, not by clock.** Two facts can share a
     timestamp; every "latest" view now dedups by `seq`. The verification

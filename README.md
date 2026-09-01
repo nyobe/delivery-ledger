@@ -102,14 +102,16 @@ need (architecture OPEN 4).
   `awaiting`/`drifted`/`converged`/`held`/`superseded` values anywhere;
 - every policy-written promotion decision passed its gate at the instant it
   was written (the ledger rebuilt at each decision's own timestamp);
-- 51 self-checks pass, each pinning something a view must *include and
-  exclude* at one of nine instants — and eight of them are **mutation
+- 60 self-checks pass, each pinning something a view must *include and
+  exclude* at one of ten instants — and eleven of them are **mutation
   checks**: the fixture is altered in memory (a verification moved before
-  its deployment; an approval by the wrong role; a decision written by a
-  person; an approval deleted and its ref stripped; a second active hold;
-  a duplicate approval; the break-glass fact removed; a verification
-  flipped to fail) and the views must say so. A SELECT cannot stay green
-  with its mechanism broken.
+  its deployment; a verification for a freight the stage never carried; an
+  approval by the wrong role; a decision written by a person; an approval
+  deleted and its ref stripped, on a gated stage and on an auto-if-safe
+  stage; a second approval term added to a policy; a second active hold; a
+  duplicate approval; the break-glass fact removed; a verification flipped
+  to fail) and the views must say so. A SELECT cannot stay green with its
+  mechanism broken.
 
 The scenario keeps one figure in one place: the timeline in `fixture.py`
 writes each timestamp once; counts and states in the page are derived.
@@ -125,8 +127,9 @@ Grounded in the repository (`doc/runbooks/reference/*.md`,
   20:00 UTC cut Mon–Thu is not modelled), the `release/YYYY-MM-DD--HHMM`
   branch, the PR against `production` labelled `release`;
 - staging deploying from the release PR the moment it opens, with no
-  precondition (`pr-staging-deploy.yml`); staging integration tests as the
-  branch-protection check; the runbook's pre-merge checks (load-generator
+  precondition (`pr-staging-deploy.yml`); the combined
+  staging-deploy-and-integration-tests check (`staging-checks-pass`) as the
+  branch-protection gate; the runbook's pre-merge checks (load-generator
   100%, smoke tests, ops channels);
 - the merge as production's approval; production's integration tests; the
   "notify deployed PRs" job that may fail without failing the release; the
@@ -136,11 +139,16 @@ Grounded in the repository (`doc/runbooks/reference/*.md`,
   force-deploy as the rollback side door — the model for the break-glass
   fact (note: pulumi-service already uses "break-glass" for the HOTFIX
   merge-queue bypass, a different thing);
-- the image-reference binding: the API advertises
-  `PULUMI_DEPLOY_DEFAULT_IMAGE_REFERENCE` and new deployment requests pick
-  it up with nothing to approve (rollback runbook, step 1);
-- the workflow AMI embedding the workflow image and reaching the pool via
-  launch template + instance refresh (rollback runbook).
+- that the API advertises `PULUMI_DEPLOY_DEFAULT_IMAGE_REFERENCE` and new
+  deployment requests pick it up (rollback runbook, step 1), and that the
+  workflow AMI embeds the workflow image and reaches the pool via launch
+  template + instance refresh (rollback runbook). What is *not* grounded is
+  drawing either as a stack-to-stack edge — see below.
+
+The runbook (`pr-and-weekly-release-process.md`) lags the workflow files on
+two of these — it still describes production-eu following production, and a
+`release/staging@…` branch format — so a reader checking the fixture against
+the runbook alone will find the runbook, not the fixture, out of date.
 
 Illustrative, i.e. the thesis's construct rather than today's pipeline:
 
@@ -161,11 +169,24 @@ Illustrative, i.e. the thesis's construct rather than today's pipeline:
   both-live → cutover → retiring). ECS's rolling update passes through those
   states, but nothing records them; "a stack at two versions at once" is
   Keith's wish, not today's tooling;
-- **the AMI edge as a gated uptake.** The real mechanism is
-  `update-workflow-ami.yml`: a daily auto-merged PR to master that rides
-  the release train — an uptake that *is* freight. The fixture deliberately
-  shows the other policy so the two sit side by side; modelling the real one
-  is a good next fact;
+- **both worker-pool bindings.** They are drawn as *by-reference*, per-stage
+  edges — a versioned record published for a stage, taken up by that
+  stage's consumer under its own policy (gated for the AMI, auto for the
+  image reference). The real AMI mechanism is *by-version*
+  (`update-workflow-ami.yml`, daily at 15:10 UTC): the bake opens a PR that
+  pins the new AMI version into pulumi-service's config and enables
+  auto-merge (`gh pr merge --squash --auto`), so the gate is the PR's
+  required checks, not a reviewer; the program derives the default
+  deployment image from the AMI's tag, so the uptake is a config change
+  inside the freight boundary that rides the release train under every
+  stage's ordinary gates. In the fixture's vocabulary that edge is
+  *auto-with-checks*, not gated. The image reference is
+  most likely a derivation from that same config, not a separate edge. The
+  fixture keeps the by-reference pair because it exercises the uptake
+  screen's mechanism (publication as evidence, uptake as intent, gated vs
+  auto); the by-version shape — published → pinned by the PR → discovered
+  as freight → lanes — is the next fact, in the multi-stack scenario where
+  bindings are the subject (smells.md #17);
 - the Wednesday-afternoon failure (an ECS circuit breaker in testing-eu) and
   the supersession (F420 landing while F419 was still rolling) — plausible,
   not from the record;

@@ -367,11 +367,14 @@ SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
   END AS label,
   CASE t.type
     WHEN 'verified' THEN
-      CASE WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
+      CASE WHEN NOT EXISTS (SELECT 1 FROM v_transition x WHERE x.stage = t.term_stage AND x.freight = fr.freight
+                              AND x.stack = 'service' AND x.outcome = 'succeeded')
+           THEN 'verification: ' || t.chk || ' in ' || t.term_stage || ' (' || t.term_stage || ' has not carried ' || fr.freight || ')'
+           WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = 'pass'
-                          AND v.ts < coalesce((SELECT min(x.finished_at) FROM v_transition x
-                                               WHERE x.stage = t.term_stage AND x.freight = fr.freight
-                                                 AND x.stack = 'service' AND x.outcome = 'succeeded'), '9999'))
+                          AND v.ts < (SELECT min(x.finished_at) FROM v_transition x
+                                      WHERE x.stage = t.term_stage AND x.freight = fr.freight
+                                        AND x.stack = 'service' AND x.outcome = 'succeeded'))
            THEN 'verification: ' || t.chk || ' in ' || t.term_stage || ' (recorded before ' || t.term_stage || ' carried ' || fr.freight || ' — re-run)'
            ELSE 'verification: ' || t.chk || ' in ' || t.term_stage END
     WHEN 'carried'               THEN t.term_stage || ' to carry ' || fr.freight
@@ -387,6 +390,14 @@ SELECT s.stage, fr.freight, t.idx, t.type, t.term_stage, t.chk, t.role,
     WHEN 'not_held'              THEN (SELECT h.placed_at FROM v_hold_active h WHERE h.stage = s.stage)
     WHEN 'plan_safe_or_approved' THEN (SELECT pl.ts FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight)
   END AS onset_at,
+  -- how a disjunctive term was (or wasn't) met — read by the diff-gate screen
+  CASE t.type
+    WHEN 'plan_safe_or_approved' THEN
+      CASE WHEN EXISTS (SELECT 1 FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight AND pl.safe = 1) THEN 'auto'
+           WHEN EXISTS (SELECT 1 FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight AND a.role = t.role) THEN 'approved'
+           WHEN NOT EXISTS (SELECT 1 FROM v_plan pl WHERE pl.stage = s.stage AND pl.freight = fr.freight) THEN 'no-plan'
+           ELSE 'open' END
+  END AS term_outcome,
   CASE t.type
     WHEN 'verified' THEN
       (SELECT v.fact FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk)
@@ -497,8 +508,9 @@ LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts > coalesce(k.since,
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
 ORDER BY s.ord;
 
--- Freight lanes: freight × stage, long form. The renderer pivots it.
-CREATE VIEW v_lanes AS
+-- Freight lanes: freight × stage, long form. The renderer pivots it and
+-- switches on `cell`; it never re-derives the classification.
+CREATE VIEW v_lanes_base AS
 SELECT fr.freight, fr.release_pr, fr.cut_at, fr.discovered_at, s.stage, s.ord,
   (SELECT min(t.finished_at) FROM v_transition t
     WHERE t.stage = s.stage AND t.freight = fr.freight AND t.stack = 'service' AND t.outcome = 'succeeded') AS reached_at,
@@ -522,6 +534,16 @@ LEFT JOIN v_gate_eval ge ON ge.stage = s.stage
 LEFT JOIN v_desired   d  ON d.stage  = s.stage
 LEFT JOIN v_carried   k  ON k.stage  = s.stage;
 
+CREATE VIEW v_lanes AS
+SELECT b.*,
+  CASE WHEN b.reached_at IS NOT NULL      THEN 'reached'
+       WHEN b.inflight_since IS NOT NULL  THEN 'in-flight'
+       WHEN b.awaiting IS NOT NULL        THEN 'awaiting'
+       WHEN b.last_outcome = 'failed'     THEN 'failed'
+       WHEN b.last_outcome = 'abandoned'  THEN 'superseded'
+       ELSE 'none' END AS cell
+FROM v_lanes_base b;
+
 -- Where is my change: PR → every freight that contains it → lanes.
 CREATE VIEW v_trace AS
 SELECT m.pr, m.title, m.author, m.introduced_in, m.freight, fr.release_pr,
@@ -532,18 +554,28 @@ JOIN v_freight fr ON fr.freight = m.freight
 JOIN v_lanes   l  ON l.freight  = m.freight;
 
 -- One cell per (PR, stage): the earliest freight that carried it there.
-CREATE VIEW v_trace_cell AS
+CREATE VIEW v_trace_cell_base AS
 SELECT t.pr, t.stage, t.ord,
        min(t.reached_at) AS reached_at,
        (SELECT t2.freight FROM v_trace t2 WHERE t2.pr = t.pr AND t2.stage = t.stage AND t2.reached_at IS NOT NULL
-          ORDER BY t2.reached_at LIMIT 1) AS via,
+          ORDER BY t2.reached_at, t2.freight LIMIT 1) AS via,
        max(t.inflight_since) AS inflight_since,
        (SELECT t2.awaiting FROM v_trace t2 WHERE t2.pr = t.pr AND t2.stage = t.stage AND t2.awaiting IS NOT NULL
-          ORDER BY t2.awaiting_since LIMIT 1) AS awaiting,
+          ORDER BY t2.awaiting_since, t2.freight LIMIT 1) AS awaiting,
        (SELECT t2.last_outcome FROM v_trace t2 WHERE t2.pr = t.pr AND t2.stage = t.stage AND t2.last_outcome IS NOT NULL
-          ORDER BY t2.last_outcome_at DESC LIMIT 1) AS last_outcome
+          ORDER BY t2.last_outcome_at DESC, t2.freight DESC LIMIT 1) AS last_outcome
 FROM v_trace t
 GROUP BY t.pr, t.stage;
+
+CREATE VIEW v_trace_cell AS
+SELECT b.*,
+  CASE WHEN b.reached_at IS NOT NULL      THEN 'reached'
+       WHEN b.inflight_since IS NOT NULL  THEN 'in-flight'
+       WHEN b.awaiting IS NOT NULL        THEN 'awaiting'
+       WHEN b.last_outcome = 'failed'     THEN 'failed'
+       WHEN b.last_outcome = 'abandoned'  THEN 'superseded'
+       ELSE 'none' END AS cell
+FROM v_trace_cell_base b;
 
 -- One line per PR: how far it got, via which freight, what it waits on next.
 CREATE VIEW v_trace_summary AS
@@ -604,37 +636,75 @@ FROM v_edge e
 LEFT JOIN v_record  r ON r.producer = e.producer
 LEFT JOIN v_uptaken u ON u.edge = e.edge;
 
--- Past releases: Keith's release cards, as a query over lanes and approvals.
+-- Past releases: Keith's release cards. The card itself is the cut freight;
+-- its per-stage cells come from v_release_stage, pivoted by the renderer over
+-- whatever stages exist (no stage is named here).
 CREATE VIEW v_releases AS
 SELECT fr.freight, fr.release_pr, fr.release_branch, fr.release_title, fr.cut_at, fr.sha,
        (SELECT count(*) FROM v_release_prs rp WHERE rp.freight = fr.freight)                                AS prs,
-       (SELECT group_concat('#' || rp.pr, ' ') FROM v_release_prs rp WHERE rp.freight = fr.freight)         AS pr_list,
-       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = 'staging')             AS staging_at,
-       (SELECT a.actor FROM v_approval a WHERE a.stage = 'production' AND a.freight = fr.freight
-          ORDER BY a.seq DESC LIMIT 1)                                                                       AS approved_by,
-       (SELECT a.ts FROM v_approval a WHERE a.stage = 'production' AND a.freight = fr.freight
-          ORDER BY a.seq DESC LIMIT 1)                                                                       AS approved_at,
-       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = 'production')          AS production_at,
-       (SELECT l.reached_at FROM v_lanes l WHERE l.freight = fr.freight AND l.stage = 'production-eu')       AS production_eu_at
+       (SELECT group_concat('#' || rp.pr, ' ') FROM v_release_prs rp WHERE rp.freight = fr.freight)         AS pr_list
 FROM v_freight fr
 WHERE fr.cut_at IS NOT NULL
 ORDER BY fr.cut_at DESC;
 
+CREATE VIEW v_release_stage AS
+SELECT fr.freight, s.stage, s.ord, l.reached_at, l.cell, l.awaiting, l.awaiting_since, l.inflight_since,
+       l.last_outcome, l.last_outcome_at, l.is_current,
+       (SELECT a.actor FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight ORDER BY a.seq DESC LIMIT 1) AS approved_by,
+       (SELECT a.ts    FROM v_approval a WHERE a.stage = s.stage AND a.freight = fr.freight ORDER BY a.seq DESC LIMIT 1) AS approved_at,
+       EXISTS (SELECT 1 FROM v_policy_term t WHERE t.stage = s.stage AND t.type IN ('approved', 'plan_safe_or_approved')) AS approvable
+FROM v_freight fr
+CROSS JOIN v_stage s
+JOIN v_lanes l ON l.freight = fr.freight AND l.stage = s.stage
+WHERE fr.cut_at IS NOT NULL;
+
 -- Audit: every promotion decision, checked against the policy that should
 -- have written it. The ledger records what it is told; this is how a rogue
 -- or unevidenced decision stays distinguishable from a legitimate one.
+--
+-- The approval-bearing terms (approved, plan_safe_or_approved) are checked
+-- as of the decision's own timestamp — was the approval, or a safe plan, on
+-- record when the decision was written? The other terms (verified, carried,
+-- not_held) are replayed by render.py's per-decision check; expressing them
+-- as-of-T in SQL wants every "latest" view parameterised by T (smells.md).
+CREATE VIEW v_audit_term AS
+SELECT d.id AS decision, substr(d.subject, 7) AS stage, json_extract(d.payload, '$.freight') AS freight, d.ts,
+       t.idx, t.type, t.role,
+  CASE t.type
+    WHEN 'approved' THEN
+      (SELECT a.fact FROM v_approval a
+        WHERE a.stage = substr(d.subject, 7) AND a.freight = json_extract(d.payload, '$.freight')
+          AND a.role = t.role AND a.ts <= d.ts ORDER BY a.seq DESC LIMIT 1)
+    WHEN 'plan_safe_or_approved' THEN
+      coalesce(
+        -- the latest plan on record at decision time, if it was safe
+        (SELECT CASE WHEN json_extract(p.payload, '$.delete') = 0 AND json_extract(p.payload, '$.replace') = 0
+                          AND NOT json_extract(p.payload, '$.migrations_changed') THEN p.id END
+           FROM facts p
+          WHERE p.kind = 'plan.summarized' AND p.subject = d.subject
+            AND json_extract(p.payload, '$.freight') = json_extract(d.payload, '$.freight') AND p.ts <= d.ts
+          ORDER BY p.seq DESC LIMIT 1),
+        (SELECT a.fact FROM v_approval a
+          WHERE a.stage = substr(d.subject, 7) AND a.freight = json_extract(d.payload, '$.freight')
+            AND a.role = t.role AND a.ts <= d.ts ORDER BY a.seq DESC LIMIT 1))
+  END AS satisfied_by,
+  CASE t.type WHEN 'approved' THEN 'approval: ' || t.role ELSE 'safe plan or approval: ' || t.role END AS requirement
+FROM facts d
+JOIN v_policy_term t ON t.stage = substr(d.subject, 7) AND t.type IN ('approved', 'plan_safe_or_approved')
+WHERE d.kind = 'promotion.decided';
+
 CREATE VIEW v_audit_decision AS
 SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.freight')         AS freight,
        f.ts, f.actor, f.rationale, f.id AS fact,
        json_array_length(f.refs)                    AS n_refs,
        p.mode,
-       (SELECT t.role FROM v_policy_term t WHERE t.stage = substr(f.subject, 7) AND t.type = 'approved' LIMIT 1) AS required_role,
-       (SELECT a.fact FROM v_approval a
-         WHERE a.stage = substr(f.subject, 7) AND a.freight = json_extract(f.payload, '$.freight')
-           AND a.ts <= f.ts
-           AND a.role = (SELECT t.role FROM v_policy_term t WHERE t.stage = substr(f.subject, 7) AND t.type = 'approved' LIMIT 1)
-         ORDER BY a.seq DESC LIMIT 1) AS approval_fact
+       (SELECT count(*) FROM v_audit_term x WHERE x.decision = f.id)                              AS n_required,
+       (SELECT count(*) FROM v_audit_term x WHERE x.decision = f.id AND x.satisfied_by IS NULL)   AS n_unmet,
+       (SELECT group_concat(x.requirement, '; ') FROM v_audit_term x
+         WHERE x.decision = f.id AND x.satisfied_by IS NULL)                                      AS unmet,
+       (SELECT group_concat(x.satisfied_by, ' ') FROM v_audit_term x
+         WHERE x.decision = f.id AND x.satisfied_by IS NOT NULL)                                  AS evidence
 FROM facts f
 JOIN v_policy p ON p.stage = substr(f.subject, 7)
 WHERE f.kind = 'promotion.decided';
@@ -642,9 +712,9 @@ WHERE f.kind = 'promotion.decided';
 CREATE VIEW v_audit_flag AS
 SELECT d.*,
   CASE
-    WHEN d.actor NOT LIKE 'policy:%'                             THEN 'decided by ' || d.actor || ' directly, not by the stage policy'
-    WHEN d.required_role IS NOT NULL AND d.approval_fact IS NULL THEN 'gated stage decided with no ' || d.required_role || ' approval on record'
-    WHEN d.n_refs = 0                                            THEN 'no evidence cited'
+    WHEN d.actor NOT LIKE 'policy:%' THEN 'decided by ' || d.actor || ' directly, not by the stage policy'
+    WHEN d.n_unmet > 0               THEN 'unmet at decision time: ' || d.unmet
+    WHEN d.n_refs = 0                THEN 'no evidence cited'
   END AS flag
 FROM v_audit_decision d;
 

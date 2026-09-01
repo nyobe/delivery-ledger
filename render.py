@@ -46,7 +46,9 @@ FORBIDDEN_VALUES = {"awaiting", "drifted", "converged", "held", "pending", "read
 DEFAULT_AS_OF = "2026-08-26T17:45:00Z"
 SNAPSHOTS = [
     # (as_of, caption) — the primary first; the rest are the time-travel tabs.
-    # Every claim in a caption is pinned by a self-check at the same instant.
+    # The captions are hand-authored page chrome, the one place this file
+    # names freights and stages outside the self-checks; every claim in them
+    # is pinned by a self-check at the same instant.
     (DEFAULT_AS_OF,           "Wed 17:45 — F418 waiting on oncall; production drifted since Monday night"),
     ("2026-08-24T16:20:00Z",  "Mon 16:20 — F417 mid-rollout to production, both versions live"),
     ("2026-08-24T16:50:00Z",  "Mon 16:50 — production-eu holds F417 for approval: the plan touches a migration"),
@@ -314,11 +316,25 @@ def self_checks(facts):
           and one(db, "SELECT mismatches FROM v_observed WHERE stage='production-eu'")["mismatches"] == 0)
     check("releases: three cut, newest first; F418 not in production; F417 and F418 each ship 3 PRs", A,
           lambda db: [r["freight"] for r in q(db, "SELECT freight FROM v_releases")] == ["F418", "F417", "F416"]
-          and one(db, "SELECT production_at FROM v_releases WHERE freight='F418'")["production_at"] is None
+          and one(db, "SELECT reached_at FROM v_release_stage WHERE freight='F418' AND stage='production'")["reached_at"] is None
           and one(db, "SELECT prs FROM v_releases WHERE freight='F417'")["prs"] == 3
           and one(db, "SELECT prs FROM v_releases WHERE freight='F418'")["prs"] == 3)
-    check("audit: no decision in the fixture is flagged", A,
-          lambda db: q(db, "SELECT * FROM v_audit_flag WHERE flag IS NOT NULL") == [])
+    check("releases: approval shown only on stages whose policy has an approval term; F417's EU approval attributed", A,
+          lambda db: q(db, "SELECT stage FROM v_release_stage WHERE approvable = 1 GROUP BY stage ORDER BY stage") == [{"stage": "production"}, {"stage": "production-eu"}]
+          and one(db, "SELECT approved_by FROM v_release_stage WHERE freight='F417' AND stage='production-eu'")["approved_by"] == "user:maya"
+          and one(db, "SELECT approved_by FROM v_release_stage WHERE freight='F416' AND stage='production-eu'")["approved_by"] is None)
+    check("lanes: cell classes are view-computed (F419: superseded in testing, failed in testing-eu; F418: awaiting in production)", A,
+          lambda db: one(db, "SELECT cell FROM v_lanes WHERE freight='F419' AND stage='testing'")["cell"] == "superseded"
+          and one(db, "SELECT cell FROM v_lanes WHERE freight='F419' AND stage='testing-eu'")["cell"] == "failed"
+          and one(db, "SELECT cell FROM v_lanes WHERE freight='F418' AND stage='production'")["cell"] == "awaiting"
+          and one(db, "SELECT cell FROM v_trace_cell WHERE pr=46181 AND stage='testing'")["cell"] == "reached")
+    check("diff-gate: term outcomes are view-computed (F416 auto, F417 approved, F418 open, F420 no-plan)", A,
+          lambda db: {r["freight"]: r["term_outcome"] for r in q(db, "SELECT freight, term_outcome FROM v_gate_term WHERE stage='production-eu' AND type='plan_safe_or_approved'")}
+          == {"F416": "auto", "F417": "approved", "F418": "open", "F419": "no-plan", "F420": "no-plan"})
+    check("audit: no decision in the fixture is flagged; production-eu's two decisions have their approval-bearing term met", A,
+          lambda db: q(db, "SELECT * FROM v_audit_flag WHERE flag IS NOT NULL") == []
+          and [r["n_unmet"] for r in q(db, "SELECT n_unmet FROM v_audit_decision WHERE stage='production-eu' ORDER BY ts")] == [0, 0]
+          and one(db, "SELECT n_required FROM v_audit_decision WHERE stage='production-eu' AND freight='F416'")["n_required"] == 1)
 
     # --- time travel ----------------------------------------------------------
     B = "2026-08-24T16:20:00Z"
@@ -385,8 +401,34 @@ def self_checks(facts):
         d["refs"] = [r for r in d.get("refs", []) if r != a["id"]]
         fs.remove(a)
     check("mutation: a gated decision with no approval on record is flagged by the audit", A,
-          lambda db: (lambda r: r["flag"] == "gated stage decided with no oncall approval on record")
+          lambda db: (lambda r: r["flag"] == "unmet at decision time: approval: oncall")
           (one(db, "SELECT * FROM v_audit_flag WHERE stage='production' AND freight='F417'")), m_unevidenced_decision)
+
+    def m_unevidenced_eu_decision(fs):
+        a = find(fs, kind="approval.granted", subject="stage:production-eu", p_freight="F417")
+        d = find(fs, kind="promotion.decided", subject="stage:production-eu", p_freight="F417")
+        d["refs"] = [r for r in d.get("refs", []) if r != a["id"]]
+        fs.remove(a)
+    check("mutation: an auto-if-safe decision on an unsafe plan with no approval is flagged (approval inside the disjunctive term counts)", A,
+          lambda db: (lambda r: r["flag"] == "unmet at decision time: safe plan or approval: oncall")
+          (one(db, "SELECT * FROM v_audit_flag WHERE stage='production-eu' AND freight='F417'"))
+          and one(db, "SELECT flag FROM v_audit_flag WHERE stage='production-eu' AND freight='F416'")["flag"] is None, m_unevidenced_eu_decision)
+
+    def m_second_approval_term(fs):
+        p = find(fs, kind="policy.declared", subject="stage:production")
+        p["payload"]["terms"].append({"type": "approved", "role": "sre"})
+    check("mutation: a second approval term is enforced by the gate AND surfaced by the audit", A,
+          lambda db: grid(db, "production")["awaiting"] == "approval: oncall"
+          and one(db, "SELECT awaiting FROM v_gate WHERE stage='production' AND freight='F417'")["awaiting"] == "approval: sre"
+          and (lambda r: r["flag"] == "unmet at decision time: approval: sre")(one(db, "SELECT * FROM v_audit_flag WHERE stage='production' AND freight='F417'")),
+          m_second_approval_term)
+
+    def m_verification_never_carried(fs):
+        fs.append({"id": "m005", "ts": "2026-08-26T17:00:00Z", "class": "observation", "kind": "verification.recorded", "subject": "stage:staging",
+                   "actor": "ci:gha", "payload": {"freight": "F420", "check": "integration-tests", "outcome": "pass", "detail": "412 tests, 0 failures"}})
+    check("mutation: a verification for a freight the stage never carried says so, not 're-run'", A,
+          lambda db: one(db, "SELECT unmet_text FROM v_gate_term WHERE stage='production' AND freight='F420' AND chk='integration-tests'")["unmet_text"]
+          == "verification: integration-tests in staging (staging has not carried F420)", m_verification_never_carried)
 
     def m_second_hold(fs):
         fs.append({"id": "m003", "ts": "2026-08-26T15:00:00Z", "class": "intent", "kind": "hold.placed", "subject": "stage:production-eu",
@@ -558,6 +600,25 @@ def screen_grid(db, as_of):
                    body, sql_block(db, "v_grid", "v_gate_eval", "v_candidate"))
 
 
+def lane_cell(c, as_of, via=None):
+    """Format one freight×stage (or PR×stage) cell from its view-computed `cell` class."""
+    kind = c["cell"]
+    if kind == "reached":
+        extra = " " + chip("converged", "current", "ok tiny") if c.get("is_current") else ""
+        if via:
+            extra += f'<div class="small muted">{esc(via)}</div>'
+        return f'<span class="reached">{esc(fmt_ts(c["reached_at"]))}</span>{extra}'
+    if kind == "in-flight":
+        return chip("in-flight", "in flight") + f'<div class="small muted">since {esc(fmt_ts(c["inflight_since"]))}</div>'
+    if kind == "awaiting":
+        since = f'<br><span class="muted">{esc(fmt_since(c["awaiting_since"], as_of))}</span>' if c.get("awaiting_since") else ""
+        return chip("awaiting") + f'<div class="small">{esc(c["awaiting"])}{since}</div>'
+    if kind in ("failed", "superseded"):
+        when = f'<div class="small muted">{esc(fmt_ts(c["last_outcome_at"]))}</div>' if c.get("last_outcome_at") else ""
+        return chip(kind, c["last_outcome"]) + when
+    return '<span class="muted">—</span>'
+
+
 def screen_lanes(db, as_of):
     stages = [r["stage"] for r in q(db, "SELECT stage FROM v_stage ORDER BY ord")]
     freights = q(db, "SELECT DISTINCT freight, release_pr, cut_at, discovered_at FROM v_lanes ORDER BY discovered_at DESC")
@@ -570,17 +631,7 @@ def screen_lanes(db, as_of):
         cells = [label]
         for s in stages:
             c = lanes[(fr["freight"], s)]
-            if c["reached_at"]:
-                cur = " " + chip("converged", "current", "ok tiny") if c["is_current"] else ""
-                cells.append(f'<span class="reached">{esc(fmt_ts(c["reached_at"]))}</span>{cur}')
-            elif c["inflight_since"]:
-                cells.append(chip("in-flight", "in flight") + f'<div class="small muted">since {esc(fmt_ts(c["inflight_since"]))}</div>')
-            elif c["awaiting"]:
-                cells.append(chip("awaiting") + f'<div class="small">{esc(c["awaiting"])}<br><span class="muted">{esc(fmt_since(c["awaiting_since"], as_of))}</span></div>')
-            elif c["last_outcome"] in ("failed", "abandoned"):
-                cells.append(chip("failed" if c["last_outcome"] == "failed" else "superseded", c["last_outcome"]) + f'<div class="small muted">{esc(fmt_ts(c["last_outcome_at"]))}</div>')
-            else:
-                cells.append('<span class="muted">—</span>')
+            cells.append(lane_cell(c, as_of))
         rows.append(cells)
     body = table(["freight"] + stages, rows, "lanes")
     return section("lanes", "1 · freight lanes", "Freight × stage",
@@ -647,16 +698,7 @@ def screen_trace(db, as_of):
         row = [line, where]
         for st in stages:
             c = cells[(s["pr"], st)]
-            if c["reached_at"]:
-                row.append(f'<span class="reached">{esc(fmt_ts(c["reached_at"]))}</span>' + (f'<div class="small muted">{esc(c["via"])}</div>' if c["via"] != s["introduced_in"] else ""))
-            elif c["inflight_since"]:
-                row.append(chip("in-flight", "in flight"))
-            elif c["awaiting"]:
-                row.append(chip("awaiting"))
-            elif c["last_outcome"] in ("failed", "abandoned"):
-                row.append(chip("failed" if c["last_outcome"] == "failed" else "superseded", c["last_outcome"]))
-            else:
-                row.append('<span class="muted">—</span>')
+            row.append(lane_cell(c, as_of, via=c["via"] if c["via"] and c["via"] != s["introduced_in"] else None))
         rows.append(row)
     body = table(["change", "where is it", *stages], rows, "trace")
     return section("trace", "3 · where is my change", "PR → freight → stages",
@@ -676,8 +718,8 @@ def screen_diffgate(db, as_of):
         st = s["stage"]
         pol = one(db, "SELECT * FROM v_policy WHERE stage=?", st)
         rows = []
-        for r in q(db, "SELECT g.*, t.satisfied_at AS term_at, t.evidence AS term_evidence, t.evidence_fact AS term_fact, t.unmet_text AS term_unmet, "
-                       "pl.n_create, pl.n_update, pl.n_delete, pl.n_replace, pl.migrations, pl.migrations_changed, pl.safe, pl.against, pl.fact AS plan_fact "
+        for r in q(db, "SELECT g.*, t.term_outcome, t.evidence AS term_evidence, t.evidence_fact AS term_fact, t.unmet_text AS term_unmet, t.role, "
+                       "pl.n_create, pl.n_update, pl.n_delete, pl.n_replace, pl.migrations, pl.migrations_changed, pl.against, pl.fact AS plan_fact "
                        "FROM v_gate g JOIN v_gate_term t ON t.stage=g.stage AND t.freight=g.freight AND t.type='plan_safe_or_approved' "
                        "LEFT JOIN v_plan pl ON pl.stage=g.stage AND pl.freight=g.freight WHERE g.stage=? ORDER BY g.freight", st):
             if r["plan_fact"] is None:
@@ -687,12 +729,12 @@ def screen_diffgate(db, as_of):
                         f'<div class="small muted">against {esc(r["against"])}</div>')
                 if r["migrations_changed"]:
                     plan += f'<div class="small"><span class="glyph">⚠</span> migrations: {esc(", ".join(json.loads(r["migrations"]) if r["migrations"] else []))}</div>'
-            if r["term_at"] is not None and r["safe"] == 1:
-                term = chip("ready", "auto") + '<div class="small">safe plan — no approval needed</div>'
-            elif r["term_at"] is not None:
-                term = chip("converged", "approved") + f'<div class="small">not safe → oncall approved: {esc(r["term_evidence"])} {fact_ref(r["term_fact"])}</div>'
-            else:
-                term = chip("awaiting", "open") + f'<div class="small">{esc(r["term_unmet"])}</div>'
+            term = {
+                "auto":     chip("ready", "auto") + '<div class="small">safe plan — no approval needed</div>',
+                "approved": chip("converged", "approved") + f'<div class="small">not safe → {esc(r["role"])} approved: {esc(r["term_evidence"])} {fact_ref(r["term_fact"])}</div>',
+                "no-plan":  chip("awaiting", "no plan") + f'<div class="small">{esc(r["term_unmet"])}</div>',
+                "open":     chip("awaiting", "open") + f'<div class="small">{esc(r["term_unmet"])}</div>',
+            }[r["term_outcome"]]
             overall = (chip("ready", "gate passes") if r["passes"] else chip("awaiting", "gate: " + r["awaiting"]))
             rows.append([mono(r["freight"]), plan, term, overall])
         heads.append(st)
@@ -725,11 +767,11 @@ def screen_uptake(db, as_of):
             state + f'<div class="small muted">{esc(r["description"])}</div>',
         ])
     body = table(["consumer · binding", "published (evidence)", "taken up (intent)", "state"], rows)
-    return section("uptake", "5 · uptake, gated and auto", "Publication is evidence; uptake is intent",
-                   "Each binding declares its uptake policy. The AMI bake published a new record and the worker pool's "
-                   "binding is gated, so the grid shows <em>available, gated</em> with a preview instead of an instance "
-                   "refresh nobody decided on. The image-reference binding is auto: the policy wrote the uptake decision "
-                   "the moment production published. Blast radius is <code>consumers WHERE pending</code>.",
+    n_pending = one(db, "SELECT count(*) AS n FROM v_pending_uptake WHERE pending = 1")["n"]
+    return section("uptake", "5 · uptake, gated and auto", f'Publication is evidence; uptake is intent — {n_pending} pending',
+                   "Each binding declares its uptake policy. On a gated edge a new record renders as <em>available, "
+                   "gated</em> with a preview until someone decides; on an auto edge the policy writes the uptake "
+                   "decision the moment the producer publishes. Blast radius is <code>consumers WHERE pending</code>.",
                    body, sql_block(db, "v_pending_uptake", "v_record", "v_uptaken"))
 
 
@@ -767,21 +809,27 @@ def screen_outofband(db, as_of):
 
 
 def screen_releases(db, as_of):
+    stages = [r["stage"] for r in q(db, "SELECT stage FROM v_stage ORDER BY ord")]
+    cells = {(r["freight"], r["stage"]): r for r in q(db, "SELECT * FROM v_release_stage")}
     rows = []
     for r in q(db, "SELECT * FROM v_releases"):
-        rows.append([
-            f'<b>{esc(r["freight"])}</b><div class="small muted">PR #{esc(r["release_pr"])} · {esc(r["release_branch"])} · {esc(r["sha"])}</div>'
-            f'<div class="small muted">{esc(r["prs"])} PRs: {esc(r["pr_list"])}</div>',
-            esc(fmt_ts(r["cut_at"])), esc(fmt_ts(r["staging_at"])) or '<span class="muted">—</span>',
-            (f'{esc(r["approved_by"])}<div class="small muted">{esc(fmt_ts(r["approved_at"]))}</div>' if r["approved_at"] else chip("awaiting")),
-            esc(fmt_ts(r["production_at"])) or '<span class="muted">—</span>',
-            esc(fmt_ts(r["production_eu_at"])) or '<span class="muted">—</span>',
-        ])
-    body = table(["release", "cut", "staging", "approved", "production", "production-eu"], rows)
+        row = [f'<b>{esc(r["freight"])}</b><div class="small muted">PR #{esc(r["release_pr"])} · {esc(r["release_branch"])} · {esc(r["sha"])}</div>'
+               f'<div class="small muted">{esc(r["prs"])} PRs: {esc(r["pr_list"])}</div>',
+               esc(fmt_ts(r["cut_at"]))]
+        for st in stages:
+            c = cells[(r["freight"], st)]
+            cell = lane_cell(c, as_of)
+            if c["approvable"]:
+                cell = (f'<div class="small">approved by {esc(c["approved_by"])} · {esc(fmt_ts(c["approved_at"]))}</div>' if c["approved_at"]
+                        else '<div class="small muted">no approval</div>') + cell
+            row.append(cell)
+        rows.append(row)
+    body = table(["release", "cut", *stages], rows)
     return section("releases", "Keith parity", "Release trains",
-                   "The past-releases cards: cut, staged, approved by whom, live where, shipping which PRs (those "
-                   "introduced since the previous cut). One query over lanes, approvals and membership.",
-                   body, sql_block(db, "v_releases", "v_release_prs"))
+                   "The past-releases cards: cut, then per stage the approval on record (where the stage's policy has "
+                   "an approval term) and when the release landed there; shipping which PRs (those introduced since "
+                   "the previous cut). One query over lanes, approvals and membership.",
+                   body, sql_block(db, "v_releases", "v_release_stage", "v_release_prs"))
 
 
 def screen_transitions(db, as_of):
@@ -819,18 +867,24 @@ def screen_transitions(db, as_of):
 def screen_audit(db, as_of):
     rows = []
     for d in q(db, "SELECT * FROM v_audit_flag ORDER BY (flag IS NULL), ts DESC"):
+        if d["n_required"] == 0:
+            approvals = '<span class="muted">none required</span>'
+        else:
+            approvals = f'{esc(d["n_required"] - d["n_unmet"])}/{esc(d["n_required"])} met ' + fact_ref(d["evidence"])
+            if d["unmet"]:
+                approvals += f'<div class="small bad-text">unmet: {esc(d["unmet"])}</div>'
         rows.append([esc(fmt_ts(d["ts"])), f'<b>{esc(d["stage"])}</b> ← {mono(d["freight"])}', esc(d["actor"]),
-                     (esc(d["required_role"]) + " " + (fact_ref(d["approval_fact"]) if d["approval_fact"] else '<span class="bad-text">none</span>')) if d["required_role"] else '<span class="muted">not required</span>',
-                     esc(d["n_refs"]),
+                     approvals, esc(d["n_refs"]),
                      (f'<span class="chip bad"><span class="glyph">⚠</span>{esc(d["flag"])}</span>' if d["flag"] else chip("converged", "clean")),
                      fact_ref(d["fact"])])
     n_flag = one(db, "SELECT count(*) AS n FROM v_audit_flag WHERE flag IS NOT NULL")["n"]
     return section("audit", "the ledger records what it is told", f'Decision audit — {n_flag} flagged',
                    "Every promotion decision, checked against the policy that should have written it: was it written "
-                   "by the stage's policy, was the required approval on record when it was written, did it cite "
-                   "evidence? An unauthorised or unevidenced decision is still a fact — this is how it stays "
-                   "distinguishable from a legitimate one.",
-                   table(["when", "decision", "written by", "approval", "refs", "audit", "fact"], rows), sql_block(db, "v_audit_decision", "v_audit_flag"))
+                   "by the stage's policy; was every approval-bearing term (an approval, or a safe plan) on record "
+                   "when it was written; did it cite evidence? An unauthorised or unevidenced decision is still a "
+                   "fact — this is how it stays distinguishable from a legitimate one.",
+                   table(["when", "decision", "written by", "approval terms at decision time", "refs", "audit", "fact"], rows),
+                   sql_block(db, "v_audit_term", "v_audit_decision", "v_audit_flag"))
 
 
 def screen_ledger(db, as_of):
