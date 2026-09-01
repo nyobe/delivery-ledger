@@ -214,20 +214,27 @@ def self_checks(check, H, facts):
           and (lambda r: r["outcome"] == "abandoned" and r["last_weight"] == 10)(one(db, "SELECT * FROM v_transition WHERE transition='transition:A232-payments-prod'")))
 
     # --- every policy-written decision passed its gate at its own instant ------------
-    # The ledger as it stood when the decision was written: everything up to
-    # that instant except the decision itself (which would already have moved
-    # intent, and with it the pair's direction).
+    # The ledger as it stood when the decision was written: everything that
+    # arrived before it — not the decision itself (which would already have
+    # moved intent, and with it the pair's direction), and not a fact from the
+    # same second that arrived after it.
+    def before(fid):
+        def cut(fs):
+            del fs[fs.index(find(fs, id=fid)):]
+        return cut
+
     for f in facts:
         if f["kind"] == "promotion.decided" and f["actor"].startswith("policy:"):
             stage, freight = f["subject"][6:], f["payload"]["freight"]
             check(f"policy decision {f['id']} ({stage} ← {freight}) passed its gate when written", f["ts"],
                   (lambda s, fr: lambda db: one(db, "SELECT passes FROM v_gate WHERE stage=? AND freight=?", s, fr)["passes"] == 1)(stage, freight),
-                  (lambda fid: lambda fs: fs.remove(find(fs, id=fid)))(f["id"]))
+                  before(f["id"]))
         if f["kind"] == "uptake.decided" and f["actor"] == "policy:uptake":
             edge, version = f["subject"], f["payload"]["record_version"]
             check(f"policy uptake {f['id']} ({edge.split('<-')[0][5:]} ← v{version}) passed its edge gate when written", f["ts"],
                   (lambda e, v: lambda db: (lambda r: r is None or r["passes"] == 1)
-                   (one(db, "SELECT passes FROM v_uptake_gate WHERE edge=? AND version=?", e, v)))(edge, version))
+                   (one(db, "SELECT passes FROM v_uptake_gate WHERE edge=? AND version=?", e, v)))(edge, version),
+                  before(f["id"]))
 
     # --- mutations: break one mechanism, expect the views to say so --------------------
     def m_smoke_before_retry(fs):

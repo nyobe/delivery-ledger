@@ -298,6 +298,11 @@ SELECT t.stage, t.stack, t.freight,
            AND u.finished_seq > coalesce((SELECT max(v.finished_seq) FROM v_freight_transition v
                                           WHERE v.stage = t.stage AND v.stack = t.stack AND v.outcome = 'succeeded'
                                             AND v.freight IS NOT NULL AND v.freight <> t.freight), 0)) AS since,
+       (SELECT min(u.finished_seq) FROM v_freight_transition u
+         WHERE u.stage = t.stage AND u.stack = t.stack AND u.outcome = 'succeeded' AND u.freight = t.freight
+           AND u.finished_seq > coalesce((SELECT max(v.finished_seq) FROM v_freight_transition v
+                                          WHERE v.stage = t.stage AND v.stack = t.stack AND v.outcome = 'succeeded'
+                                            AND v.freight IS NOT NULL AND v.freight <> t.freight), 0)) AS since_seq,
        t.finished_at AS last_enacted_at, t.finished_seq, t.ops_update, t.transition, t.finished_fact AS fact
 FROM v_freight_transition t
 WHERE t.outcome = 'succeeded' AND t.freight IS NOT NULL
@@ -307,9 +312,9 @@ WHERE t.outcome = 'succeeded' AND t.freight IS NOT NULL
 
 -- When a stage first carried a freight on every one of its freight stacks.
 CREATE VIEW v_first_carried AS
-SELECT s.stage, t.freight, max(t.first_at) AS at
+SELECT s.stage, t.freight, max(t.first_at) AS at, max(t.first_seq) AS first_seq
 FROM v_stage s
-JOIN (SELECT x.stage, x.stack, x.freight, min(x.finished_at) AS first_at
+JOIN (SELECT x.stage, x.stack, x.freight, min(x.finished_at) AS first_at, min(x.finished_seq) AS first_seq
         FROM v_freight_transition x
        WHERE x.outcome = 'succeeded' AND x.freight IS NOT NULL
        GROUP BY x.stage, x.stack, x.freight) t ON t.stage = s.stage
@@ -323,6 +328,7 @@ CREATE VIEW v_carried AS
 SELECT s.stage,
        CASE WHEN count(k.stack) = n.n AND count(DISTINCT k.freight) = 1 THEN min(k.freight) END AS freight,
        max(k.since)                                 AS since,
+       max(k.since_seq)                             AS since_seq,
        last.ops_update, last.transition, last.fact,
        count(k.stack)                               AS n_stacks_carrying,
        n.n                                          AS n_stacks,
@@ -493,10 +499,10 @@ SELECT substr(f.subject, 7)                         AS stage,
                   AND json_extract(f.payload, '$.replace') = 0
                   AND NOT json_extract(f.payload, '$.migrations_changed')) END AS safe,
        -- a plan is against the world at T: once the stage has carried some
-       -- other freight since it was computed, it is stale
+       -- other freight since it was computed (by arrival), it is stale
        (NOT EXISTS (SELECT 1 FROM v_freight_transition o
                      WHERE o.stage = substr(f.subject, 7) AND o.outcome = 'succeeded' AND o.freight IS NOT NULL
-                       AND o.freight <> json_extract(f.payload, '$.freight') AND o.finished_at > f.ts)) AS current,
+                       AND o.freight <> json_extract(f.payload, '$.freight') AND o.finished_seq > f.seq)) AS current,
        f.ts, f.id AS fact
 FROM facts f
 WHERE f.kind = 'plan.summarized'
@@ -544,7 +550,7 @@ SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.to_freight')      AS to_freight,
        json_extract(f.payload, '$.incident')        AS incident,
        json_extract(f.payload, '$.expiry')          AS expiry,
-       f.actor, f.ts, f.rationale, f.id AS fact
+       f.actor, f.ts, f.seq, f.rationale, f.id AS fact
 FROM facts f
 WHERE f.kind = 'breakglass.recorded'
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);
@@ -627,8 +633,8 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
     WHEN 'verified' THEN
       (SELECT v.ts FROM v_verified v
         WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk AND v.outcome = 'pass'
-          AND v.ts >= coalesce((SELECT fc.at FROM v_first_carried fc
-                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), '9999'))
+          AND v.seq > coalesce((SELECT fc.first_seq FROM v_first_carried fc
+                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), 2147483647))
     WHEN 'carried' THEN
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN 'approved' THEN
@@ -662,7 +668,7 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
            THEN 'verification: ' || t.chk || ' in ' || t.term_stage || ' (' || t.term_stage || ' has not carried ' || fr.freight || ')'
            WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = 'pass'
-                          AND v.ts < (SELECT fc.at FROM v_first_carried fc
+                          AND v.seq < (SELECT fc.first_seq FROM v_first_carried fc
                                       WHERE fc.stage = t.term_stage AND fc.freight = fr.freight))
            THEN 'verification: ' || t.chk || ' in ' || t.term_stage || ' (recorded before ' || t.term_stage || ' carried ' || fr.freight || ' — re-run)'
            ELSE 'verification: ' || t.chk || ' in ' || t.term_stage END
@@ -903,7 +909,7 @@ LEFT JOIN v_step_gate     sg ON sg.transition = i.transition
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
 LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
-LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts > coalesce(k.since, '')
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.seq > coalesce(k.since_seq, 0)
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
 LEFT JOIN v_freight_transition eng ON eng.stage = s.stage AND eng.outcome = 'succeeded' AND eng.ops_update IS NOT NULL
      AND eng.finished_seq = (SELECT max(x.finished_seq) FROM v_freight_transition x
@@ -1392,10 +1398,10 @@ SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
            FROM facts p
           WHERE p.kind = 'plan.summarized' AND p.subject = 'stage:' || c.stage
             AND json_extract(p.payload, '$.against_record') IS NULL
-            AND json_extract(p.payload, '$.freight') = c.freight AND p.ts <= c.ts
+            AND json_extract(p.payload, '$.freight') = c.freight AND p.seq < c.seq
             AND NOT EXISTS (SELECT 1 FROM v_freight_transition o
                              WHERE o.stage = c.stage AND o.outcome = 'succeeded' AND o.freight IS NOT NULL
-                               AND o.freight <> c.freight AND o.finished_at > p.ts AND o.finished_at <= c.ts)
+                               AND o.freight <> c.freight AND o.finished_seq > p.seq AND o.finished_seq < c.seq)
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
           WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
@@ -1441,7 +1447,7 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, '$.record_ve
     WHEN 'approved' THEN
       (SELECT a.fact FROM v_edge_approval a
         WHERE a.edge = d.subject AND a.version = json_extract(d.payload, '$.record_version')
-          AND a.role = t.role AND a.ts <= d.ts ORDER BY a.seq DESC LIMIT 1)
+          AND a.role = t.role AND a.seq < d.seq ORDER BY a.seq DESC LIMIT 1)
     WHEN 'plan_safe_or_approved' THEN
       coalesce(
         (SELECT CASE WHEN json_extract(p.payload, '$.delete') = 0 AND json_extract(p.payload, '$.replace') = 0
@@ -1450,11 +1456,11 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, '$.record_ve
           WHERE p.kind = 'plan.summarized' AND p.subject = 'stage:' || e.consumer_stage
             AND json_extract(p.payload, '$.against_record.producer') = e.producer
             AND json_extract(p.payload, '$.against_record.version') = json_extract(d.payload, '$.record_version')
-            AND p.ts <= d.ts
+            AND p.seq < d.seq
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_edge_approval a
           WHERE a.edge = d.subject AND a.version = json_extract(d.payload, '$.record_version')
-            AND a.role = t.role AND a.ts <= d.ts ORDER BY a.seq DESC LIMIT 1))
+            AND a.role = t.role AND a.seq < d.seq ORDER BY a.seq DESC LIMIT 1))
   END AS satisfied_by,
   CASE t.type WHEN 'approved' THEN 'approval: ' || t.role ELSE 'safe preview or approval: ' || t.role END AS requirement
 FROM facts d

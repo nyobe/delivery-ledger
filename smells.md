@@ -409,7 +409,7 @@ screen still a SELECT over `facts`. What it cost the views, honestly:
     freight until some decision lands. Cheap to add (`rollback.withdrawn`,
     or a request naming no freight); left out until a fixture wants it.
 
-## 2026-09-02 — the canary (multistack, Wednesday)
+## 2026-09-01 — the canary (multistack, Wednesday)
 
 **Still no second mutable table.** Both-live, a gate inside a transition, an
 automatic abort, and every screen a SELECT. What the canary cost, and what
@@ -515,8 +515,9 @@ legs, a freight one stack ran). Fixed in the revision; what stays as record:
     the rolled-back F418 and the aborted A232 read `ready`. The audit's
     as-of floor had the mirror hole. Every "latest" view here already
     dedups by `seq` (#12); the new floors now do too (`moved_seq`,
-    `started_seq`), and direction, reversal and membership order freights
-    by `(discovered_at, seq)`. The lesson is #12 restated for relations:
+    `started_seq`, and — after the pass, #58 — the plan, verification and
+    break-glass floors), and direction, reversal and membership order
+    freights by `(discovered_at, seq)`. The lesson is #12 restated for relations:
     any comparison between two facts is by arrival, and `ts` is for
     display and for the clock-relative terms only.
 
@@ -558,3 +559,46 @@ legs, a freight one stack ran). Fixed in the revision; what stays as record:
     The honest split is structured columns (which approval, which
     decision) and a sentence built in the renderer — deferred, since the
     checks pin the sentence.
+
+## 2026-09-01 — pass 4's two dropped findings, recovered
+
+Pass 4 dropped two findings whose refuters produced no structured output.
+The following session pulled them from the workflow journal:
+
+58. **The plan floor was the third clock site, and #52 was one floor short
+    until it moved.** `v_plan.current` asked whether another freight had
+    been carried *after* the plan by `finished_at > ts`, and the audit's
+    as-of test asked whether the plan was on record *before* the decision
+    by `ts <= ts`. A safe plan sharing a carry's second but arriving before
+    it read current, and production-eu's auto-if-safe follower would have
+    followed a rollback on it; the audit credited a plan arriving after the
+    decision in its own second. Latent in both fixtures (no plan/carry
+    tie), which is also why the pass's own refuter could say the earlier
+    fixes "covered the ties" — it enumerated the ties it knew. All four
+    comparisons are by `seq` now; two mutations pin the two sites
+    separately, because the audit re-derives currency inline rather than
+    reading `v_plan` (it needs as-of-decision semantics), and a fix to one
+    site says nothing about the other — the mirror-hole pattern of #52
+    again. Since one more instance had survived a pass aimed at the
+    class, the rest of the file was swept for comparisons between two
+    facts' timestamps: the verification floor (`v.ts >= first carry`),
+    the break-glass join (`bg.ts > carried since`) and the uptake audit's
+    as-of (`a.ts <= d.ts`, `p.ts <= d.ts`) were the same shape and are
+    by `seq` too (a third mutation pins the verification floor); the
+    harnesses' decision replay, which sliced the ledger by the decision's
+    *timestamp*, now cuts it at the decision's position. What remains on
+    `ts` is legitimately clock: `as_of`, `within_hours`, and release-card
+    membership (a PR's merge time against a cut — the world's order, not
+    the ledger's). The standing suggestion in threads (state "compare
+    facts by seq" at the top of views.sql and lint for it) is still the
+    remedy for the class; a sweep is a one-time substitute for it.
+
+59. **Desired-relative direction reclassifies the incumbent.** Once a
+    newer freight is decided for a stage, the freight it still *carries*
+    is older than desired, so a move back to it is a rollback, and the
+    approval that admitted it has lapsed (#33). That is the same relation
+    that makes an abort a reversal (#47), read from the other end: the
+    incumbent's gate is whatever a rollback *to* it would need to pass,
+    which is right when the newer freight has started and arguable when
+    it has not. Recorded, not changed; it is one of the direction calls
+    the sketches made unilaterally.

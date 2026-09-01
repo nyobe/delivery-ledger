@@ -955,7 +955,7 @@ def screen_outofband(db, as_of):
         return section("oob", "the side door", "Out-of-band reality", "No conformance reads yet.", "", sql_block(db, "v_observed"))
     parts, heads = [], []
     for o in reads:
-        bg = one(db, "SELECT bg.* FROM v_breakglass bg LEFT JOIN v_carried k ON k.stage=bg.stage WHERE bg.stage=? AND bg.ts > coalesce(k.since,'')", o["stage"])
+        bg = one(db, "SELECT bg.* FROM v_breakglass bg LEFT JOIN v_carried k ON k.stage=bg.stage WHERE bg.stage=? AND bg.seq > coalesce(k.since_seq,0)", o["stage"])
         rows = []
         for svc in q(db, "SELECT * FROM v_observed_service WHERE stage=? ORDER BY service", o["stage"]):
             rows.append([mono(svc["service"]), esc(svc["expected"]), mono(svc["observed"]) + (f' <span class="small muted">{esc(svc["role"])}</span>' if svc["role"] else ""),

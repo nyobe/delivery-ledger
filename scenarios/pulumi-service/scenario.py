@@ -245,17 +245,32 @@ def self_checks(check, H, facts):
           and grid(db, "testing-eu")["status"] == "pending")
 
     # --- every policy-written decision passed its gate at its own instant ------
-    # The ledger as it stood when the decision was written: everything up to
-    # that instant except the decision itself (which would already have moved
-    # intent, and with it the pair's direction).
+    # The ledger as it stood when the decision was written: everything that
+    # arrived before it — not the decision itself (which would already have
+    # moved intent, and with it the pair's direction), and not a fact from the
+    # same second that arrived after it.
+    def before(fid):
+        def cut(fs):
+            del fs[fs.index(find(fs, id=fid)):]
+        return cut
+
     for f in facts:
         if f["kind"] == "promotion.decided" and f["actor"].startswith("policy:"):
             stage, freight = f["subject"][6:], f["payload"]["freight"]
             check(f"policy decision {f['id']} ({stage} ← {freight}) passed its gate when written", f["ts"],
                   (lambda s, fr: lambda db: one(db, "SELECT passes FROM v_gate WHERE stage=? AND freight=?", s, fr)["passes"] == 1)(stage, freight),
-                  (lambda fid: lambda fs: fs.remove(find(fs, id=fid)))(f["id"]))
+                  before(f["id"]))
 
     # --- mutations: break one mechanism, expect the views to say so -------------
+    def m_same_second_verification(fs):
+        # staging's F418 verification moved into the carry's own second but arriving before it: not after, by arrival
+        v = find(fs, kind="verification.recorded", subject="stage:staging", p_freight="F418", p_check="integration-tests")
+        c = find(fs, kind="transition.finished", subject="transition:F418-staging")
+        fs.remove(v); v["ts"] = c["ts"]; fs.insert(fs.index(c), v)
+    check("mutation: a verification in the carry's own second that arrived before it does not count — 'after' is by arrival here too", A,
+          lambda db: grid(db, "production")["awaiting"].startswith("verification: integration-tests in staging (recorded before"),
+          m_same_second_verification)
+
     def m_verify_before_deploy(fs):
         v = find(fs, kind="verification.recorded", subject="stage:staging", p_freight="F418", p_check="integration-tests")
         v["ts"] = "2026-08-26T15:10:00Z"
@@ -421,4 +436,26 @@ def self_checks(check, H, facts):
     check("mutation: an approval in the reversal's own second that arrived before it does not survive it — 'after' is by arrival", R2,
           lambda db: grid(db, "production")["status"] == "awaiting" and grid(db, "production")["awaiting_type"] == "approved"
           and one(db, "SELECT valid FROM v_approval WHERE fact='m012'")["valid"] == 0, m_same_second_approval)
+
+    def m_same_second_plan(fs):
+        # a safe EU plan for F417 that shares F418's EU carry's second but arrived before it: against the pre-carry world, by arrival
+        fs.remove(find(fs, kind="plan.summarized", subject="stage:production-eu", p_freight="F417", ts="2026-08-27T11:30:00Z"))
+        c = find(fs, kind="transition.finished", subject="transition:F418-prod-eu")
+        fs.insert(fs.index(c), {"id": "m015", "ts": "2026-08-27T09:58:00Z", "class": "observation", "kind": "plan.summarized", "subject": "stage:production-eu",
+                                "actor": "ci:gha", "payload": {"freight": "F417", "against": "F417", "create": 0, "update": 0, "delete": 0, "replace": 0,
+                                                               "migrations_changed": False, "run": "gha:plan/7860"}})
+    check("mutation: a safe plan in the carry's own second that arrived before it is stale — 'since' is by arrival; production-eu does not auto-follow the rollback on it", R2,
+          lambda db: one(db, "SELECT current FROM v_plan WHERE stage='production-eu' AND freight='F417'")["current"] == 0
+          and one(db, "SELECT term_outcome FROM v_gate_term WHERE stage='production-eu' AND freight='F417' AND type='plan_safe_or_approved'")["term_outcome"] == "stale"
+          and (lambda r: r["status"] == "awaiting" and r["passes"] == 0 and r["awaiting_type"] == "plan_safe_or_approved")(grid(db, "production-eu")),
+          m_same_second_plan)
+
+    def m_same_second_plan_audit(fs):
+        # the safe plan the auto decision cited, moved into the decision's own second but arriving after it: not on record at decision time, by arrival
+        p = find(fs, id="f040"); d = find(fs, id="f041")
+        fs.remove(p); p["ts"] = d["ts"]; fs.insert(fs.index(d) + 1, p)
+        d["refs"] = [r for r in d["refs"] if r != "f040"]
+    check("mutation: the audit does not credit a safe plan that arrived after the decision in the decision's own second — as-of is by arrival", A,
+          lambda db: (lambda r: r["flag"] == "unmet at decision time: safe plan or approval: oncall")
+          (one(db, "SELECT * FROM v_audit_flag WHERE stage='production-eu' AND freight='F416'")), m_same_second_plan_audit)
 

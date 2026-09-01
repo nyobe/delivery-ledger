@@ -152,7 +152,7 @@ LEFT JOIN v_step_gate     sg ON sg.transition = i.transition
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
 LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
-LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.seq &gt; coalesce(k.since_seq, 0)
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
 LEFT JOIN v_freight_transition eng ON eng.stage = s.stage AND eng.outcome = &#x27;succeeded&#x27; AND eng.ops_update IS NOT NULL
      AND eng.finished_seq = (SELECT max(x.finished_seq) FROM v_freight_transition x
@@ -219,8 +219,8 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
     WHEN &#x27;verified&#x27; THEN
       (SELECT v.ts FROM v_verified v
         WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-          AND v.ts &gt;= coalesce((SELECT fc.at FROM v_first_carried fc
-                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), &#x27;9999&#x27;))
+          AND v.seq &gt; coalesce((SELECT fc.first_seq FROM v_first_carried fc
+                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), 2147483647))
     WHEN &#x27;carried&#x27; THEN
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN &#x27;approved&#x27; THEN
@@ -254,7 +254,7 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (&#x27; || t.term_stage || &#x27; has not carried &#x27; || fr.freight || &#x27;)&#x27;
            WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-                          AND v.ts &lt; (SELECT fc.at FROM v_first_carried fc
+                          AND v.seq &lt; (SELECT fc.first_seq FROM v_first_carried fc
                                       WHERE fc.stage = t.term_stage AND fc.freight = fr.freight))
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (recorded before &#x27; || t.term_stage || &#x27; carried &#x27; || fr.freight || &#x27; — re-run)&#x27;
            ELSE &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage END
@@ -678,7 +678,7 @@ SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, &#x27;$.to_freight&#x27;)      AS to_freight,
        json_extract(f.payload, &#x27;$.incident&#x27;)        AS incident,
        json_extract(f.payload, &#x27;$.expiry&#x27;)          AS expiry,
-       f.actor, f.ts, f.rationale, f.id AS fact
+       f.actor, f.ts, f.seq, f.rationale, f.id AS fact
 FROM facts f
 WHERE f.kind = &#x27;breakglass.recorded&#x27;
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);</pre></details></section><section id="transitions"><div class="eyebrow">fact grain ≠ step grain</div><h2>Inside a transition</h2><p class="blurb">A transition is the enactment reified: one subject, many facts. Position lives in phase facts the grid can read; resource steps land on the same subject when the executor emits them; a failure carries its step and error; an abandonment cites the decision that superseded it. Side jobs attach to the stage and never gate anything.</p><h3><code>transition:P12-cluster-staging</code> — P12 → platform/staging · <span class="chip bad"><span class="glyph">✕</span>failed</span></h3><p class="small muted">Tue Sep 1 10:08 → Tue Sep 1 10:25 · 0 resource steps recorded · run gha:platform-deploy/12s</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Tue Sep 1 10:08</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started</td><td><a class="fact" href="#f108">f108</a></td></tr><tr><td>Tue Sep 1 10:25</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>failed</b> · update #2012 · {&quot;create&quot;: 0, &quot;update&quot;: 0, &quot;delete&quot;: 0, &quot;replace&quot;: 0}<div class="small">aws:eks/nodeGroup:NodeGroup pool-131: creating: ResourceLimitExceeded: vCPU quota for m6i in us-west-2</div></td><td><a class="fact" href="#f109">f109</a></td></tr></tbody></table></div><h3><code>transition:P12-cluster-prod</code> — P12 → platform/prod · <span class="chip ok"><span class="glyph">●</span>succeeded</span></h3><p class="small muted">Tue Sep 1 14:22 → Tue Sep 1 14:50 · 0 resource steps recorded · run gha:platform-deploy/12p</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Tue Sep 1 14:22</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started</td><td><a class="fact" href="#f126">f126</a></td></tr><tr><td>Tue Sep 1 14:23</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>control-plane</b> — control plane upgrading to 1.31</td><td><a class="fact" href="#f127">f127</a></td></tr><tr><td>Tue Sep 1 14:34</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>node-pool</b> — pool-131 created in three subnets; pool-130 cordoned and draining</td><td><a class="fact" href="#f128">f128</a></td></tr><tr><td>Tue Sep 1 14:46</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>retiring</b> — pool-130 deleted</td><td><a class="fact" href="#f129">f129</a></td></tr><tr><td>Tue Sep 1 14:50</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>succeeded</b> · update #2012 · {&quot;create&quot;: 2, &quot;update&quot;: 5, &quot;delete&quot;: 0, &quot;replace&quot;: 1}</td><td><a class="fact" href="#f130">f130</a></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_transition AS
@@ -745,10 +745,10 @@ SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
            FROM facts p
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || c.stage
             AND json_extract(p.payload, &#x27;$.against_record&#x27;) IS NULL
-            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.ts &lt;= c.ts
+            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.seq &lt; c.seq
             AND NOT EXISTS (SELECT 1 FROM v_freight_transition o
                              WHERE o.stage = c.stage AND o.outcome = &#x27;succeeded&#x27; AND o.freight IS NOT NULL
-                               AND o.freight &lt;&gt; c.freight AND o.finished_at &gt; p.ts AND o.finished_at &lt;= c.ts)
+                               AND o.freight &lt;&gt; c.freight AND o.finished_seq &gt; p.seq AND o.finished_seq &lt; c.seq)
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
           WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
@@ -792,7 +792,7 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
     WHEN &#x27;approved&#x27; THEN
       (SELECT a.fact FROM v_edge_approval a
         WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-          AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1)
+          AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1)
     WHEN &#x27;plan_safe_or_approved&#x27; THEN
       coalesce(
         (SELECT CASE WHEN json_extract(p.payload, &#x27;$.delete&#x27;) = 0 AND json_extract(p.payload, &#x27;$.replace&#x27;) = 0
@@ -801,11 +801,11 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || e.consumer_stage
             AND json_extract(p.payload, &#x27;$.against_record.producer&#x27;) = e.producer
             AND json_extract(p.payload, &#x27;$.against_record.version&#x27;) = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND p.ts &lt;= d.ts
+            AND p.seq &lt; d.seq
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_edge_approval a
           WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1))
+            AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1))
   END AS satisfied_by,
   CASE t.type WHEN &#x27;approved&#x27; THEN &#x27;approval: &#x27; || t.role ELSE &#x27;safe preview or approval: &#x27; || t.role END AS requirement
 FROM facts d
@@ -906,7 +906,7 @@ LEFT JOIN v_step_gate     sg ON sg.transition = i.transition
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
 LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
-LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.seq &gt; coalesce(k.since_seq, 0)
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
 LEFT JOIN v_freight_transition eng ON eng.stage = s.stage AND eng.outcome = &#x27;succeeded&#x27; AND eng.ops_update IS NOT NULL
      AND eng.finished_seq = (SELECT max(x.finished_seq) FROM v_freight_transition x
@@ -973,8 +973,8 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
     WHEN &#x27;verified&#x27; THEN
       (SELECT v.ts FROM v_verified v
         WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-          AND v.ts &gt;= coalesce((SELECT fc.at FROM v_first_carried fc
-                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), &#x27;9999&#x27;))
+          AND v.seq &gt; coalesce((SELECT fc.first_seq FROM v_first_carried fc
+                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), 2147483647))
     WHEN &#x27;carried&#x27; THEN
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN &#x27;approved&#x27; THEN
@@ -1008,7 +1008,7 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (&#x27; || t.term_stage || &#x27; has not carried &#x27; || fr.freight || &#x27;)&#x27;
            WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-                          AND v.ts &lt; (SELECT fc.at FROM v_first_carried fc
+                          AND v.seq &lt; (SELECT fc.first_seq FROM v_first_carried fc
                                       WHERE fc.stage = t.term_stage AND fc.freight = fr.freight))
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (recorded before &#x27; || t.term_stage || &#x27; carried &#x27; || fr.freight || &#x27; — re-run)&#x27;
            ELSE &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage END
@@ -1497,10 +1497,10 @@ SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
            FROM facts p
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || c.stage
             AND json_extract(p.payload, &#x27;$.against_record&#x27;) IS NULL
-            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.ts &lt;= c.ts
+            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.seq &lt; c.seq
             AND NOT EXISTS (SELECT 1 FROM v_freight_transition o
                              WHERE o.stage = c.stage AND o.outcome = &#x27;succeeded&#x27; AND o.freight IS NOT NULL
-                               AND o.freight &lt;&gt; c.freight AND o.finished_at &gt; p.ts AND o.finished_at &lt;= c.ts)
+                               AND o.freight &lt;&gt; c.freight AND o.finished_seq &gt; p.seq AND o.finished_seq &lt; c.seq)
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
           WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
@@ -1544,7 +1544,7 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
     WHEN &#x27;approved&#x27; THEN
       (SELECT a.fact FROM v_edge_approval a
         WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-          AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1)
+          AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1)
     WHEN &#x27;plan_safe_or_approved&#x27; THEN
       coalesce(
         (SELECT CASE WHEN json_extract(p.payload, &#x27;$.delete&#x27;) = 0 AND json_extract(p.payload, &#x27;$.replace&#x27;) = 0
@@ -1553,11 +1553,11 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || e.consumer_stage
             AND json_extract(p.payload, &#x27;$.against_record.producer&#x27;) = e.producer
             AND json_extract(p.payload, &#x27;$.against_record.version&#x27;) = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND p.ts &lt;= d.ts
+            AND p.seq &lt; d.seq
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_edge_approval a
           WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1))
+            AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1))
   END AS satisfied_by,
   CASE t.type WHEN &#x27;approved&#x27; THEN &#x27;approval: &#x27; || t.role ELSE &#x27;safe preview or approval: &#x27; || t.role END AS requirement
 FROM facts d
@@ -1658,7 +1658,7 @@ LEFT JOIN v_step_gate     sg ON sg.transition = i.transition
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
 LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
-LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.seq &gt; coalesce(k.since_seq, 0)
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
 LEFT JOIN v_freight_transition eng ON eng.stage = s.stage AND eng.outcome = &#x27;succeeded&#x27; AND eng.ops_update IS NOT NULL
      AND eng.finished_seq = (SELECT max(x.finished_seq) FROM v_freight_transition x
@@ -1725,8 +1725,8 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
     WHEN &#x27;verified&#x27; THEN
       (SELECT v.ts FROM v_verified v
         WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-          AND v.ts &gt;= coalesce((SELECT fc.at FROM v_first_carried fc
-                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), &#x27;9999&#x27;))
+          AND v.seq &gt; coalesce((SELECT fc.first_seq FROM v_first_carried fc
+                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), 2147483647))
     WHEN &#x27;carried&#x27; THEN
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN &#x27;approved&#x27; THEN
@@ -1760,7 +1760,7 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (&#x27; || t.term_stage || &#x27; has not carried &#x27; || fr.freight || &#x27;)&#x27;
            WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-                          AND v.ts &lt; (SELECT fc.at FROM v_first_carried fc
+                          AND v.seq &lt; (SELECT fc.first_seq FROM v_first_carried fc
                                       WHERE fc.stage = t.term_stage AND fc.freight = fr.freight))
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (recorded before &#x27; || t.term_stage || &#x27; carried &#x27; || fr.freight || &#x27; — re-run)&#x27;
            ELSE &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage END
@@ -2249,10 +2249,10 @@ SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
            FROM facts p
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || c.stage
             AND json_extract(p.payload, &#x27;$.against_record&#x27;) IS NULL
-            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.ts &lt;= c.ts
+            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.seq &lt; c.seq
             AND NOT EXISTS (SELECT 1 FROM v_freight_transition o
                              WHERE o.stage = c.stage AND o.outcome = &#x27;succeeded&#x27; AND o.freight IS NOT NULL
-                               AND o.freight &lt;&gt; c.freight AND o.finished_at &gt; p.ts AND o.finished_at &lt;= c.ts)
+                               AND o.freight &lt;&gt; c.freight AND o.finished_seq &gt; p.seq AND o.finished_seq &lt; c.seq)
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
           WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
@@ -2296,7 +2296,7 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
     WHEN &#x27;approved&#x27; THEN
       (SELECT a.fact FROM v_edge_approval a
         WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-          AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1)
+          AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1)
     WHEN &#x27;plan_safe_or_approved&#x27; THEN
       coalesce(
         (SELECT CASE WHEN json_extract(p.payload, &#x27;$.delete&#x27;) = 0 AND json_extract(p.payload, &#x27;$.replace&#x27;) = 0
@@ -2305,11 +2305,11 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || e.consumer_stage
             AND json_extract(p.payload, &#x27;$.against_record.producer&#x27;) = e.producer
             AND json_extract(p.payload, &#x27;$.against_record.version&#x27;) = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND p.ts &lt;= d.ts
+            AND p.seq &lt; d.seq
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_edge_approval a
           WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1))
+            AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1))
   END AS satisfied_by,
   CASE t.type WHEN &#x27;approved&#x27; THEN &#x27;approval: &#x27; || t.role ELSE &#x27;safe preview or approval: &#x27; || t.role END AS requirement
 FROM facts d
@@ -2410,7 +2410,7 @@ LEFT JOIN v_step_gate     sg ON sg.transition = i.transition
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
 LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
-LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.seq &gt; coalesce(k.since_seq, 0)
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
 LEFT JOIN v_freight_transition eng ON eng.stage = s.stage AND eng.outcome = &#x27;succeeded&#x27; AND eng.ops_update IS NOT NULL
      AND eng.finished_seq = (SELECT max(x.finished_seq) FROM v_freight_transition x
@@ -2477,8 +2477,8 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
     WHEN &#x27;verified&#x27; THEN
       (SELECT v.ts FROM v_verified v
         WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-          AND v.ts &gt;= coalesce((SELECT fc.at FROM v_first_carried fc
-                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), &#x27;9999&#x27;))
+          AND v.seq &gt; coalesce((SELECT fc.first_seq FROM v_first_carried fc
+                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), 2147483647))
     WHEN &#x27;carried&#x27; THEN
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN &#x27;approved&#x27; THEN
@@ -2512,7 +2512,7 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (&#x27; || t.term_stage || &#x27; has not carried &#x27; || fr.freight || &#x27;)&#x27;
            WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-                          AND v.ts &lt; (SELECT fc.at FROM v_first_carried fc
+                          AND v.seq &lt; (SELECT fc.first_seq FROM v_first_carried fc
                                       WHERE fc.stage = t.term_stage AND fc.freight = fr.freight))
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (recorded before &#x27; || t.term_stage || &#x27; carried &#x27; || fr.freight || &#x27; — re-run)&#x27;
            ELSE &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage END
@@ -3001,10 +3001,10 @@ SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
            FROM facts p
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || c.stage
             AND json_extract(p.payload, &#x27;$.against_record&#x27;) IS NULL
-            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.ts &lt;= c.ts
+            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.seq &lt; c.seq
             AND NOT EXISTS (SELECT 1 FROM v_freight_transition o
                              WHERE o.stage = c.stage AND o.outcome = &#x27;succeeded&#x27; AND o.freight IS NOT NULL
-                               AND o.freight &lt;&gt; c.freight AND o.finished_at &gt; p.ts AND o.finished_at &lt;= c.ts)
+                               AND o.freight &lt;&gt; c.freight AND o.finished_seq &gt; p.seq AND o.finished_seq &lt; c.seq)
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
           WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
@@ -3048,7 +3048,7 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
     WHEN &#x27;approved&#x27; THEN
       (SELECT a.fact FROM v_edge_approval a
         WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-          AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1)
+          AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1)
     WHEN &#x27;plan_safe_or_approved&#x27; THEN
       coalesce(
         (SELECT CASE WHEN json_extract(p.payload, &#x27;$.delete&#x27;) = 0 AND json_extract(p.payload, &#x27;$.replace&#x27;) = 0
@@ -3057,11 +3057,11 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || e.consumer_stage
             AND json_extract(p.payload, &#x27;$.against_record.producer&#x27;) = e.producer
             AND json_extract(p.payload, &#x27;$.against_record.version&#x27;) = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND p.ts &lt;= d.ts
+            AND p.seq &lt; d.seq
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_edge_approval a
           WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1))
+            AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1))
   END AS satisfied_by,
   CASE t.type WHEN &#x27;approved&#x27; THEN &#x27;approval: &#x27; || t.role ELSE &#x27;safe preview or approval: &#x27; || t.role END AS requirement
 FROM facts d
@@ -3162,7 +3162,7 @@ LEFT JOIN v_step_gate     sg ON sg.transition = i.transition
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
 LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
-LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.seq &gt; coalesce(k.since_seq, 0)
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
 LEFT JOIN v_freight_transition eng ON eng.stage = s.stage AND eng.outcome = &#x27;succeeded&#x27; AND eng.ops_update IS NOT NULL
      AND eng.finished_seq = (SELECT max(x.finished_seq) FROM v_freight_transition x
@@ -3229,8 +3229,8 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
     WHEN &#x27;verified&#x27; THEN
       (SELECT v.ts FROM v_verified v
         WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-          AND v.ts &gt;= coalesce((SELECT fc.at FROM v_first_carried fc
-                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), &#x27;9999&#x27;))
+          AND v.seq &gt; coalesce((SELECT fc.first_seq FROM v_first_carried fc
+                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), 2147483647))
     WHEN &#x27;carried&#x27; THEN
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN &#x27;approved&#x27; THEN
@@ -3264,7 +3264,7 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (&#x27; || t.term_stage || &#x27; has not carried &#x27; || fr.freight || &#x27;)&#x27;
            WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-                          AND v.ts &lt; (SELECT fc.at FROM v_first_carried fc
+                          AND v.seq &lt; (SELECT fc.first_seq FROM v_first_carried fc
                                       WHERE fc.stage = t.term_stage AND fc.freight = fr.freight))
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (recorded before &#x27; || t.term_stage || &#x27; carried &#x27; || fr.freight || &#x27; — re-run)&#x27;
            ELSE &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage END
@@ -3636,7 +3636,7 @@ SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, &#x27;$.to_freight&#x27;)      AS to_freight,
        json_extract(f.payload, &#x27;$.incident&#x27;)        AS incident,
        json_extract(f.payload, &#x27;$.expiry&#x27;)          AS expiry,
-       f.actor, f.ts, f.rationale, f.id AS fact
+       f.actor, f.ts, f.seq, f.rationale, f.id AS fact
 FROM facts f
 WHERE f.kind = &#x27;breakglass.recorded&#x27;
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);</pre></details></section><section id="transitions"><div class="eyebrow">fact grain ≠ step grain</div><h2>Inside a transition</h2><p class="blurb">A transition is the enactment reified: one subject, many facts. Position lives in phase facts the grid can read; resource steps land on the same subject when the executor emits them; a failure carries its step and error; an abandonment cites the decision that superseded it. Side jobs attach to the stage and never gate anything.</p><h3><code>transition:P12-cluster-staging</code> — P12 → platform/staging · <span class="chip bad"><span class="glyph">✕</span>failed</span></h3><p class="small muted">Tue Sep 1 10:08 → Tue Sep 1 10:25 · 0 resource steps recorded · run gha:platform-deploy/12s</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Tue Sep 1 10:08</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started</td><td><a class="fact" href="#f108">f108</a></td></tr><tr><td>Tue Sep 1 10:25</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>failed</b> · update #2012 · {&quot;create&quot;: 0, &quot;update&quot;: 0, &quot;delete&quot;: 0, &quot;replace&quot;: 0}<div class="small">aws:eks/nodeGroup:NodeGroup pool-131: creating: ResourceLimitExceeded: vCPU quota for m6i in us-west-2</div></td><td><a class="fact" href="#f109">f109</a></td></tr></tbody></table></div><h3><code>transition:P12-cluster-prod</code> — P12 → platform/prod · <span class="chip ok"><span class="glyph">●</span>succeeded</span></h3><p class="small muted">Tue Sep 1 14:22 → Tue Sep 1 14:50 · 0 resource steps recorded · run gha:platform-deploy/12p</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Tue Sep 1 14:22</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started</td><td><a class="fact" href="#f126">f126</a></td></tr><tr><td>Tue Sep 1 14:23</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>control-plane</b> — control plane upgrading to 1.31</td><td><a class="fact" href="#f127">f127</a></td></tr><tr><td>Tue Sep 1 14:34</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>node-pool</b> — pool-131 created in three subnets; pool-130 cordoned and draining</td><td><a class="fact" href="#f128">f128</a></td></tr><tr><td>Tue Sep 1 14:46</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>retiring</b> — pool-130 deleted</td><td><a class="fact" href="#f129">f129</a></td></tr><tr><td>Tue Sep 1 14:50</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>succeeded</b> · update #2012 · {&quot;create&quot;: 2, &quot;update&quot;: 5, &quot;delete&quot;: 0, &quot;replace&quot;: 1}</td><td><a class="fact" href="#f130">f130</a></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_transition AS
@@ -3703,10 +3703,10 @@ SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
            FROM facts p
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || c.stage
             AND json_extract(p.payload, &#x27;$.against_record&#x27;) IS NULL
-            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.ts &lt;= c.ts
+            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.seq &lt; c.seq
             AND NOT EXISTS (SELECT 1 FROM v_freight_transition o
                              WHERE o.stage = c.stage AND o.outcome = &#x27;succeeded&#x27; AND o.freight IS NOT NULL
-                               AND o.freight &lt;&gt; c.freight AND o.finished_at &gt; p.ts AND o.finished_at &lt;= c.ts)
+                               AND o.freight &lt;&gt; c.freight AND o.finished_seq &gt; p.seq AND o.finished_seq &lt; c.seq)
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
           WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
@@ -3750,7 +3750,7 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
     WHEN &#x27;approved&#x27; THEN
       (SELECT a.fact FROM v_edge_approval a
         WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-          AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1)
+          AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1)
     WHEN &#x27;plan_safe_or_approved&#x27; THEN
       coalesce(
         (SELECT CASE WHEN json_extract(p.payload, &#x27;$.delete&#x27;) = 0 AND json_extract(p.payload, &#x27;$.replace&#x27;) = 0
@@ -3759,11 +3759,11 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || e.consumer_stage
             AND json_extract(p.payload, &#x27;$.against_record.producer&#x27;) = e.producer
             AND json_extract(p.payload, &#x27;$.against_record.version&#x27;) = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND p.ts &lt;= d.ts
+            AND p.seq &lt; d.seq
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_edge_approval a
           WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1))
+            AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1))
   END AS satisfied_by,
   CASE t.type WHEN &#x27;approved&#x27; THEN &#x27;approval: &#x27; || t.role ELSE &#x27;safe preview or approval: &#x27; || t.role END AS requirement
 FROM facts d
@@ -3864,7 +3864,7 @@ LEFT JOIN v_step_gate     sg ON sg.transition = i.transition
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
 LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
-LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.seq &gt; coalesce(k.since_seq, 0)
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
 LEFT JOIN v_freight_transition eng ON eng.stage = s.stage AND eng.outcome = &#x27;succeeded&#x27; AND eng.ops_update IS NOT NULL
      AND eng.finished_seq = (SELECT max(x.finished_seq) FROM v_freight_transition x
@@ -3931,8 +3931,8 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
     WHEN &#x27;verified&#x27; THEN
       (SELECT v.ts FROM v_verified v
         WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-          AND v.ts &gt;= coalesce((SELECT fc.at FROM v_first_carried fc
-                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), &#x27;9999&#x27;))
+          AND v.seq &gt; coalesce((SELECT fc.first_seq FROM v_first_carried fc
+                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), 2147483647))
     WHEN &#x27;carried&#x27; THEN
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN &#x27;approved&#x27; THEN
@@ -3966,7 +3966,7 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (&#x27; || t.term_stage || &#x27; has not carried &#x27; || fr.freight || &#x27;)&#x27;
            WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-                          AND v.ts &lt; (SELECT fc.at FROM v_first_carried fc
+                          AND v.seq &lt; (SELECT fc.first_seq FROM v_first_carried fc
                                       WHERE fc.stage = t.term_stage AND fc.freight = fr.freight))
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (recorded before &#x27; || t.term_stage || &#x27; carried &#x27; || fr.freight || &#x27; — re-run)&#x27;
            ELSE &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage END
@@ -4390,7 +4390,7 @@ SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, &#x27;$.to_freight&#x27;)      AS to_freight,
        json_extract(f.payload, &#x27;$.incident&#x27;)        AS incident,
        json_extract(f.payload, &#x27;$.expiry&#x27;)          AS expiry,
-       f.actor, f.ts, f.rationale, f.id AS fact
+       f.actor, f.ts, f.seq, f.rationale, f.id AS fact
 FROM facts f
 WHERE f.kind = &#x27;breakglass.recorded&#x27;
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);</pre></details></section><section id="transitions"><div class="eyebrow">fact grain ≠ step grain</div><h2>Inside a transition</h2><p class="blurb">A transition is the enactment reified: one subject, many facts. Position lives in phase facts the grid can read; resource steps land on the same subject when the executor emits them; a failure carries its step and error; an abandonment cites the decision that superseded it. Side jobs attach to the stage and never gate anything.</p><h3><code>transition:P12-cluster-staging</code> — P12 → platform/staging · <span class="chip bad"><span class="glyph">✕</span>failed</span></h3><p class="small muted">Tue Sep 1 10:08 → Tue Sep 1 10:25 · 0 resource steps recorded · run gha:platform-deploy/12s</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Tue Sep 1 10:08</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started</td><td><a class="fact" href="#f108">f108</a></td></tr><tr><td>Tue Sep 1 10:25</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>failed</b> · update #2012 · {&quot;create&quot;: 0, &quot;update&quot;: 0, &quot;delete&quot;: 0, &quot;replace&quot;: 0}<div class="small">aws:eks/nodeGroup:NodeGroup pool-131: creating: ResourceLimitExceeded: vCPU quota for m6i in us-west-2</div></td><td><a class="fact" href="#f109">f109</a></td></tr></tbody></table></div><h3><code>transition:P12-cluster-prod</code> — P12 → platform/prod · <span class="chip ok"><span class="glyph">●</span>succeeded</span></h3><p class="small muted">Tue Sep 1 14:22 → Tue Sep 1 14:50 · 0 resource steps recorded · run gha:platform-deploy/12p</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Tue Sep 1 14:22</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started</td><td><a class="fact" href="#f126">f126</a></td></tr><tr><td>Tue Sep 1 14:23</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>control-plane</b> — control plane upgrading to 1.31</td><td><a class="fact" href="#f127">f127</a></td></tr><tr><td>Tue Sep 1 14:34</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>node-pool</b> — pool-131 created in three subnets; pool-130 cordoned and draining</td><td><a class="fact" href="#f128">f128</a></td></tr><tr><td>Tue Sep 1 14:46</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>retiring</b> — pool-130 deleted</td><td><a class="fact" href="#f129">f129</a></td></tr><tr><td>Tue Sep 1 14:50</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>succeeded</b> · update #2012 · {&quot;create&quot;: 2, &quot;update&quot;: 5, &quot;delete&quot;: 0, &quot;replace&quot;: 1}</td><td><a class="fact" href="#f130">f130</a></td></tr></tbody></table></div><h3><code>transition:A232-payments-prod</code> — A232 → payments/prod · <span class="chip live"><span class="glyph">◌</span>in flight</span></h3><p class="small muted">Wed Sep 2 11:01 → in flight · 0 resource steps recorded · run argo:rollouts/payments-api/rev-12</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Wed Sep 2 11:01</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started · canary (argo-rollouts): 10% → pause until analysed and promoted → 100%</td><td><a class="fact" href="#f157">f157</a></td></tr><tr><td>Wed Sep 2 11:02</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>canary</b> · step 1 · 10% canary — canary ReplicaSet healthy; 10% of traffic</td><td><a class="fact" href="#f158">f158</a></td></tr><tr><td>Wed Sep 2 11:03</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>paused</b> · step 2 · 10% canary — paused at the step gate: AnalysisRun canary-analysis started (30m), promote pending</td><td><a class="fact" href="#f159">f159</a></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_transition AS
@@ -4457,10 +4457,10 @@ SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
            FROM facts p
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || c.stage
             AND json_extract(p.payload, &#x27;$.against_record&#x27;) IS NULL
-            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.ts &lt;= c.ts
+            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.seq &lt; c.seq
             AND NOT EXISTS (SELECT 1 FROM v_freight_transition o
                              WHERE o.stage = c.stage AND o.outcome = &#x27;succeeded&#x27; AND o.freight IS NOT NULL
-                               AND o.freight &lt;&gt; c.freight AND o.finished_at &gt; p.ts AND o.finished_at &lt;= c.ts)
+                               AND o.freight &lt;&gt; c.freight AND o.finished_seq &gt; p.seq AND o.finished_seq &lt; c.seq)
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
           WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
@@ -4504,7 +4504,7 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
     WHEN &#x27;approved&#x27; THEN
       (SELECT a.fact FROM v_edge_approval a
         WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-          AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1)
+          AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1)
     WHEN &#x27;plan_safe_or_approved&#x27; THEN
       coalesce(
         (SELECT CASE WHEN json_extract(p.payload, &#x27;$.delete&#x27;) = 0 AND json_extract(p.payload, &#x27;$.replace&#x27;) = 0
@@ -4513,11 +4513,11 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || e.consumer_stage
             AND json_extract(p.payload, &#x27;$.against_record.producer&#x27;) = e.producer
             AND json_extract(p.payload, &#x27;$.against_record.version&#x27;) = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND p.ts &lt;= d.ts
+            AND p.seq &lt; d.seq
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_edge_approval a
           WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1))
+            AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1))
   END AS satisfied_by,
   CASE t.type WHEN &#x27;approved&#x27; THEN &#x27;approval: &#x27; || t.role ELSE &#x27;safe preview or approval: &#x27; || t.role END AS requirement
 FROM facts d
@@ -4618,7 +4618,7 @@ LEFT JOIN v_step_gate     sg ON sg.transition = i.transition
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
 LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
-LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.ts &gt; coalesce(k.since, &#x27;&#x27;)
+LEFT JOIN v_breakglass    bg ON bg.stage = s.stage AND bg.seq &gt; coalesce(k.since_seq, 0)
 LEFT JOIN v_hold_active   h  ON h.stage  = s.stage
 LEFT JOIN v_freight_transition eng ON eng.stage = s.stage AND eng.outcome = &#x27;succeeded&#x27; AND eng.ops_update IS NOT NULL
      AND eng.finished_seq = (SELECT max(x.finished_seq) FROM v_freight_transition x
@@ -4685,8 +4685,8 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
     WHEN &#x27;verified&#x27; THEN
       (SELECT v.ts FROM v_verified v
         WHERE v.stage = t.term_stage AND v.freight = fr.freight AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-          AND v.ts &gt;= coalesce((SELECT fc.at FROM v_first_carried fc
-                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), &#x27;9999&#x27;))
+          AND v.seq &gt; coalesce((SELECT fc.first_seq FROM v_first_carried fc
+                                WHERE fc.stage = t.term_stage AND fc.freight = fr.freight), 2147483647))
     WHEN &#x27;carried&#x27; THEN
       (SELECT k.since FROM v_carried k WHERE k.stage = t.term_stage AND k.freight = fr.freight)
     WHEN &#x27;approved&#x27; THEN
@@ -4720,7 +4720,7 @@ SELECT s.stage, fr.freight, dr.direction, t.idx, t.type, t.term_stage, t.chk, t.
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (&#x27; || t.term_stage || &#x27; has not carried &#x27; || fr.freight || &#x27;)&#x27;
            WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = t.term_stage AND v.freight = fr.freight
                           AND v.chk = t.chk AND v.outcome = &#x27;pass&#x27;
-                          AND v.ts &lt; (SELECT fc.at FROM v_first_carried fc
+                          AND v.seq &lt; (SELECT fc.first_seq FROM v_first_carried fc
                                       WHERE fc.stage = t.term_stage AND fc.freight = fr.freight))
            THEN &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage || &#x27; (recorded before &#x27; || t.term_stage || &#x27; carried &#x27; || fr.freight || &#x27; — re-run)&#x27;
            ELSE &#x27;verification: &#x27; || t.chk || &#x27; in &#x27; || t.term_stage END
@@ -5144,7 +5144,7 @@ SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, &#x27;$.to_freight&#x27;)      AS to_freight,
        json_extract(f.payload, &#x27;$.incident&#x27;)        AS incident,
        json_extract(f.payload, &#x27;$.expiry&#x27;)          AS expiry,
-       f.actor, f.ts, f.rationale, f.id AS fact
+       f.actor, f.ts, f.seq, f.rationale, f.id AS fact
 FROM facts f
 WHERE f.kind = &#x27;breakglass.recorded&#x27;
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);</pre></details></section><section id="transitions"><div class="eyebrow">fact grain ≠ step grain</div><h2>Inside a transition</h2><p class="blurb">A transition is the enactment reified: one subject, many facts. Position lives in phase facts the grid can read; resource steps land on the same subject when the executor emits them; a failure carries its step and error; an abandonment cites the decision that superseded it. Side jobs attach to the stage and never gate anything.</p><h3><code>transition:P12-cluster-staging</code> — P12 → platform/staging · <span class="chip bad"><span class="glyph">✕</span>failed</span></h3><p class="small muted">Tue Sep 1 10:08 → Tue Sep 1 10:25 · 0 resource steps recorded · run gha:platform-deploy/12s</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Tue Sep 1 10:08</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started</td><td><a class="fact" href="#f108">f108</a></td></tr><tr><td>Tue Sep 1 10:25</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>failed</b> · update #2012 · {&quot;create&quot;: 0, &quot;update&quot;: 0, &quot;delete&quot;: 0, &quot;replace&quot;: 0}<div class="small">aws:eks/nodeGroup:NodeGroup pool-131: creating: ResourceLimitExceeded: vCPU quota for m6i in us-west-2</div></td><td><a class="fact" href="#f109">f109</a></td></tr></tbody></table></div><h3><code>transition:P12-cluster-prod</code> — P12 → platform/prod · <span class="chip ok"><span class="glyph">●</span>succeeded</span></h3><p class="small muted">Tue Sep 1 14:22 → Tue Sep 1 14:50 · 0 resource steps recorded · run gha:platform-deploy/12p</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Tue Sep 1 14:22</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started</td><td><a class="fact" href="#f126">f126</a></td></tr><tr><td>Tue Sep 1 14:23</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>control-plane</b> — control plane upgrading to 1.31</td><td><a class="fact" href="#f127">f127</a></td></tr><tr><td>Tue Sep 1 14:34</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>node-pool</b> — pool-131 created in three subnets; pool-130 cordoned and draining</td><td><a class="fact" href="#f128">f128</a></td></tr><tr><td>Tue Sep 1 14:46</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>retiring</b> — pool-130 deleted</td><td><a class="fact" href="#f129">f129</a></td></tr><tr><td>Tue Sep 1 14:50</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>succeeded</b> · update #2012 · {&quot;create&quot;: 2, &quot;update&quot;: 5, &quot;delete&quot;: 0, &quot;replace&quot;: 1}</td><td><a class="fact" href="#f130">f130</a></td></tr></tbody></table></div><h3><code>transition:A232-payments-prod</code> — A232 → payments/prod · <span class="chip live"><span class="glyph">↷</span>abandoned</span></h3><p class="small muted">Wed Sep 2 11:01 → Wed Sep 2 11:33 · 0 resource steps recorded · run argo:rollouts/payments-api/rev-12</p><div class="scroll"><table class=""><thead><tr><th>when</th><th>class</th><th>kind</th><th></th><th>fact</th></tr></thead><tbody><tr><td>Wed Sep 2 11:01</td><td><span class="cls observation">observation</span></td><td><code>transition.started</code></td><td>started · canary (argo-rollouts): 10% → pause until analysed and promoted → 100%</td><td><a class="fact" href="#f157">f157</a></td></tr><tr><td>Wed Sep 2 11:02</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>canary</b> · step 1 · 10% canary — canary ReplicaSet healthy; 10% of traffic</td><td><a class="fact" href="#f158">f158</a></td></tr><tr><td>Wed Sep 2 11:03</td><td><span class="cls observation">observation</span></td><td><code>transition.phase</code></td><td>phase <b>paused</b> · step 2 · 10% canary — paused at the step gate: AnalysisRun canary-analysis started (30m), promote pending</td><td><a class="fact" href="#f159">f159</a></td></tr><tr><td>Wed Sep 2 11:33</td><td><span class="cls observation">observation</span></td><td><code>transition.finished</code></td><td>finished · <b>abandoned</b><div class="small">rollout aborted: canary ReplicaSet scaled to 0, weights reset; stable A231 untouched</div></td><td><a class="fact" href="#f163">f163</a></td></tr></tbody></table></div><details class="sql"><summary>the query</summary><pre>CREATE VIEW v_transition AS
@@ -5211,10 +5211,10 @@ SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
            FROM facts p
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || c.stage
             AND json_extract(p.payload, &#x27;$.against_record&#x27;) IS NULL
-            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.ts &lt;= c.ts
+            AND json_extract(p.payload, &#x27;$.freight&#x27;) = c.freight AND p.seq &lt; c.seq
             AND NOT EXISTS (SELECT 1 FROM v_freight_transition o
                              WHERE o.stage = c.stage AND o.outcome = &#x27;succeeded&#x27; AND o.freight IS NOT NULL
-                               AND o.freight &lt;&gt; c.freight AND o.finished_at &gt; p.ts AND o.finished_at &lt;= c.ts)
+                               AND o.freight &lt;&gt; c.freight AND o.finished_seq &gt; p.seq AND o.finished_seq &lt; c.seq)
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
           WHERE a.stage = c.stage AND a.freight = c.freight AND a.role = t.role
@@ -5258,7 +5258,7 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
     WHEN &#x27;approved&#x27; THEN
       (SELECT a.fact FROM v_edge_approval a
         WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-          AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1)
+          AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1)
     WHEN &#x27;plan_safe_or_approved&#x27; THEN
       coalesce(
         (SELECT CASE WHEN json_extract(p.payload, &#x27;$.delete&#x27;) = 0 AND json_extract(p.payload, &#x27;$.replace&#x27;) = 0
@@ -5267,11 +5267,11 @@ SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, &#x27;$.reco
           WHERE p.kind = &#x27;plan.summarized&#x27; AND p.subject = &#x27;stage:&#x27; || e.consumer_stage
             AND json_extract(p.payload, &#x27;$.against_record.producer&#x27;) = e.producer
             AND json_extract(p.payload, &#x27;$.against_record.version&#x27;) = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND p.ts &lt;= d.ts
+            AND p.seq &lt; d.seq
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_edge_approval a
           WHERE a.edge = d.subject AND a.version = json_extract(d.payload, &#x27;$.record_version&#x27;)
-            AND a.role = t.role AND a.ts &lt;= d.ts ORDER BY a.seq DESC LIMIT 1))
+            AND a.role = t.role AND a.seq &lt; d.seq ORDER BY a.seq DESC LIMIT 1))
   END AS satisfied_by,
   CASE t.type WHEN &#x27;approved&#x27; THEN &#x27;approval: &#x27; || t.role ELSE &#x27;safe preview or approval: &#x27; || t.role END AS requirement
 FROM facts d

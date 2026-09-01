@@ -10,11 +10,14 @@ Shape: one workflow, 47 agents. Ten hunters/lenses in parallel (six
 mutation hunters: approval floor, plan staleness, direction/reversal, live
 set/conformance, step gate, audit as-of; four lenses: SQL edges, claims vs
 code, render, design semantics), then one adversarial refuter per finding
-(reproduce from scratch; default to refuted). Two refuters failed to produce
-structured output and their findings were dropped unverified. Per-agent
+(reproduce from scratch; default to refuted). The hunters reported 37
+findings; two refuters failed to produce structured output and their
+findings were dropped unverified — both were recovered from the journal by
+the following session (9ba241fa) and are listed at the end. Per-agent
 receipts: the session's `subagents/workflows/wf_03a73f18-4b6/journal.jsonl`.
 
-Result: 35 findings; 30 confirmed, 2 downgraded, 3 refuted.
+Result: 35 findings verified; 30 confirmed, 2 downgraded, 3 refuted; plus the
+two recovered below (1 confirmed and fixed, 1 recorded).
 
 Escapes and bugs, fixed in the revision commit
 ----------------------------------------------
@@ -90,8 +93,34 @@ Refuted (kept for the record)
 -----------------------------
 - "ts-vs-seq is used in several latest views" beyond the two demonstrated
   — the refuter showed lint's monotonic-ts rule makes ts and seq agree
-  except on ties, which the two fixes above cover.
+  except on ties. The two fixes above covered the ties the refuter knew
+  of; the plan floor (recovered below) was a third tie site neither the
+  finding nor the refutation had enumerated.
 - "Approval lapse is direction-blind: a forward supersession voids a
   still-valid approval" — this is the documented rule (#33), deliberately.
 - "v_live announces an in-flight freight as live before any weight" —
   the documented intent (m_no_weights pins it).
+
+Recovered after the pass (session 9ba241fa)
+-------------------------------------------
+- Plan-staleness hunter, its only finding — an escape, same class as the
+  consent floor: v_plan.current compared `o.finished_at > f.ts` and
+  v_audit_term's inline currency test compared `p.ts <= c.ts`,
+  `o.finished_at > p.ts`, `o.finished_at <= c.ts`. A safe plan sharing a
+  whole second with another freight's carry but arriving before it read
+  current, and production-eu's auto-if-safe rollback gate passed on it;
+  the audit credited a plan that arrived after the decision in the
+  decision's own second. Latent — neither fixture has a plan/carry tie
+  (the hunter's own collision sweep). Fixed in the follow-up commit: all
+  four comparisons by seq, and the same sweep applied to the remaining
+  fact-vs-fact clock comparisons (verification floor, break-glass join,
+  uptake audit as-of, the harnesses' decision replay). Pinned:
+  m_same_second_plan (gate side), m_same_second_plan_audit (audit side),
+  m_same_second_verification. smells #58.
+- Semantics lens, its sixth finding — a design smell, low: because
+  direction is relative to desired, the freight a stage is still carrying
+  reclassifies as a rollback candidate with a lapsed approval the instant a
+  newer freight is decided. Not changed; it is the consequence of the
+  switch that made an abort a reversal (smells #47), and the carried
+  freight's gate is what a rollback *to* it would have to pass. Recorded
+  as smells #59, and on the list of calls for Claire to overturn.

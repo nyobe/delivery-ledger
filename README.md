@@ -248,9 +248,9 @@ so rather than passing them.
   `awaiting`/`drifted`/`converged`/`held`/`superseded` values anywhere;
 - every policy-written promotion decision passed its gate at the instant it
   was written (the ledger rebuilt at each decision's own timestamp);
-- the scenario's self-checks pass (88 for pulumi-service, 80 for
+- the scenario's self-checks pass (91 for pulumi-service, 80 for
   multistack), each pinning something a view must *include and exclude* at
-  one instant — and twenty-one (twenty-one) of them are **mutation checks**. For
+  one instant — and twenty-four (twenty-one) of them are **mutation checks**. For
   pulumi-service: the fixture is altered in memory (a verification moved before
   its deployment; a verification for a freight the stage never carried; an
   approval by the wrong role; a decision written by a person; an approval
@@ -265,7 +265,10 @@ so rather than passing them.
   backward plan; the request removed; a hold on production during the
   request; an approval sharing the reversal's second but arriving before
   it; F418 re-approved and re-decided after the rollback, so the reversal
-  clears) and the views must say so. For
+  clears; a safe EU plan sharing F418's carry's second but arriving before
+  it; the plan an auto decision cited moved into the decision's own second
+  but after it; a staging verification sharing the carry's second but
+  arriving before it) and the views must say so. For
   multistack: a staging verification
   recorded between the network leg and the retried cluster leg; an uptake
   with its approval deleted, or written by a person, or approved by the

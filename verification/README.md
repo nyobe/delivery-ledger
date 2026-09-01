@@ -31,4 +31,8 @@ what holds now.
   and three unexercised shapes (a rollback of a rollback, a multi-stack
   stage between legs, a freight one stack ran). Drove the revision commit
   (seq floors, a reversal that clears, per-stack `v_live`, `v_freight`
-  dedup, two lint rules, five new checks, smells #52–#57).
+  dedup, two lint rules, five new checks, smells #52–#57). Two findings
+  the pass dropped unverified were recovered afterwards (session
+  9ba241fa): the plan floor was a third clock-comparison site, fixed in a
+  follow-up commit that also swept the remaining fact-vs-fact clock
+  comparisons, three more checks (smells #58); the other is #59.
