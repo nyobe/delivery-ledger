@@ -90,6 +90,8 @@ def rule_text(subject, terms):
             parts.append(f"NOT held({subject})")
         elif k == "plan_safe_or_approved":
             parts.append(f"(plan({subject}, F).safe OR approved({subject}, F, role = '{t['role']}'))")
+        elif k == "previously_carried":
+            parts.append(f"carried_before({subject}, F" + (f", within {t['within_hours']}h)" if t.get("within_hours") else ")"))
     return " AND ".join(parts) or "true"
 
 
@@ -114,12 +116,32 @@ intent(T(8, 24, "15:00:01"), "warehouse.declared", "warehouse:payments", "user:d
         "images": ["payments-api"], "config": "esc:acme/payments (base_image_version pinned here)", "via": VIA_A})
 
 
+def previously_carried(within_hours=None):
+    t = {"type": "previously_carried"}
+    if within_hours:
+        t["within_hours"] = within_hours
+    return t
+
+
 def stage(program, env, ord_, owner, slack, upstream, stacks, actor, via, **extra):
     name = f"{program}/{env}"
     p = dict({"order": ord_, "display": name, "program": program, "environment": env, "region": REGION[env],
               "owner": owner, "slack": slack, "upstream": upstream, "stacks": stacks, "via": via}, **extra)
     return intent(T(8, 24, f"15:00:{ord_ + 1:02d}"), "stage.declared", f"stage:{name}", actor, p)
 
+
+# payments/prod is enacted as a canary (Argo Rollouts' shape): 10% of traffic
+# to the new ReplicaSet, then a pause the executor may only leave once the
+# analysis has passed and oncall has promoted — the cutover is a decision
+# inside the transition, and its gate uses the stage-gate term vocabulary
+# with one more floor (facts since the rollout started).
+CANARY_STEPS = [
+    {"setWeight": 10},
+    {"pause": {"terms": [verified("payments/prod", "canary-analysis"),
+                         approved("payments-oncall", via="kubectl argo rollouts promote payments-api")]}},
+    {"setWeight": 100},
+]
+CANARY_STEPS[1]["pause"]["rule"] = rule_text("payments/prod", CANARY_STEPS[1]["pause"]["terms"])
 
 stage("platform", "dev",     1, "platform-eng", "#platform-dev",   "warehouse:platform",  ["network", "cluster"], "user:rafael", VIA_P)
 stage("platform", "staging", 2, "platform-eng", "#platform-ops",   "platform/dev",        ["network", "cluster"], "user:rafael", VIA_P)
@@ -128,13 +150,18 @@ stage("platform", "prod",    3, "platform-eng", "#platform-ops",   "platform/sta
 stage("payments", "dev",     4, "payments",     "#payments-dev",   "warehouse:payments",  ["payments"], "user:dana", VIA_A)
 stage("payments", "staging", 5, "payments",     "#payments-ops",   "payments/dev",        ["payments"], "user:dana", VIA_A)
 stage("payments", "prod",    6, "payments",     "#payments-ops",   "payments/staging",    ["payments"], "user:dana", VIA_A,
-      url="https://pay.acme.example", ops="acme/payments/prod")
+      url="https://pay.acme.example", ops="acme/payments/prod",
+      strategy={"kind": "canary", "via": "argo-rollouts", "steps": CANARY_STEPS})
 
 
-def policy(name, mode, trigger, terms, desc, actor, i):
+def policy(name, mode, trigger, terms, desc, actor, i, rollback=None):
     p = {"mode": mode, "terms": terms, "rule": rule_text(name, terms), "description": desc}
     if trigger:
         p["trigger"] = trigger
+    if rollback:
+        rmode, rterms, rdesc = rollback
+        p["rollback"] = {"mode": rmode, "terms": rterms, "rule": rule_text(name, rterms), "description": rdesc}
+        terms = terms + rterms
     if any(t["type"] == "plan_safe_or_approved" for t in terms):
         p["safe"] = SAFE_RULE
     return intent(T(8, 24, f"15:00:{10 + i:02d}"), "policy.declared", f"stage:{name}", actor, p)
@@ -155,7 +182,10 @@ policy("payments/staging", "auto",  None, [verified("payments/dev", "integration
 policy("payments/prod",    "gated", None,
        [verified("payments/staging", "integration"), verified("payments/staging", "canary"),
         approved("payments-oncall", via="pulumi delivery approve payments/prod")],
-       "Payments oncall decides what reaches prod.", "user:dana", 5)
+       "Payments oncall decides what reaches prod.", "user:dana", 5,
+       rollback=("auto", [previously_carried()],
+                 "Returning prod to a freight it ran before needs no one: the executor aborts the rollout and the "
+                 "stable set is untouched. A failed canary analysis writes this decision automatically."))
 
 
 # --- bindings: one pattern per program, instantiated per environment -----------
@@ -264,8 +294,8 @@ def finished(ts, tid, outcome, ops_update=None, summary=None, refs=(), **extra):
     return observe(ts, "transition.finished", f"transition:{tid}", "ci:gha", p, refs=refs)
 
 
-def phase(ts, tid, name, detail):
-    return observe(ts, "transition.phase", f"transition:{tid}", "ci:gha", {"phase": name, "detail": detail})
+def phase(ts, tid, name, detail, actor="ci:gha", **extra):
+    return observe(ts, "transition.phase", f"transition:{tid}", actor, dict({"phase": name, "detail": detail}, **extra))
 
 
 def verify(ts, stg, freight, check, outcome, detail, actor="ci:gha"):
@@ -525,6 +555,46 @@ payments_enact(9, 1, "16:13:00", "prod", "A231", [dec231, u4p], 4, (0, 3, 0, 1),
 verify(T(9, 1, "16:50:00"), "payments/prod", "A231", "integration", "pass", "221 tests, 0 failures")
 observed(T(9, 2, "08:00:00"), "platform/prod", {"network": "P12", "cluster": "P12"})
 observed(T(9, 2, "08:00:10"), "payments/prod", {"payments": "A231"})
+
+# ---------------------------------------------------------------------------
+# Wednesday: a payments canary that fails its analysis and is aborted
+# ---------------------------------------------------------------------------
+# A232 rides the train to prod under the ordinary gate; prod's strategy is a
+# canary, so the enactment holds both A231 and A232 live at 10% and pauses on
+# a step gate (analysis + promote). The analysis fails; the policy's rollback
+# block writes intent back to A231 with nobody involved; the executor
+# abandons the rollout citing that decision. Nothing was ever carried, and
+# A232's approval no longer counts.
+d232 = discovered(T(9, 2, "09:30:00"), "payments", "A232", "d04e7a1",
+                  [pr(4440, "checkout: retry on gateway timeout", "sam")],
+                  "gha:payments-build/2232", config={"base_image_version": 41}, images={"payments-api": "sha256:a232cc"})
+dec = decide(T(9, 2, "09:31:00"), "payments/dev", "A232", "policy:payments/dev", "auto: payments build discovered", [d232])
+f = payments_enact(9, 2, "09:32:00", "dev", "A232", [dec], 4, (0, 1, 0, 0))
+verify(T(9, 2, "09:55:00"), "payments/dev", "A232", "integration", "pass", "221 tests, 0 failures")
+dec = decide(T(9, 2, "09:56:00"), "payments/staging", "A232", "policy:payments/staging", "auto: dev carries and verified A232", [f])
+f = payments_enact(9, 2, "09:57:00", "staging", "A232", [dec], 4, (0, 1, 0, 0))
+verify(T(9, 2, "10:25:00"), "payments/staging", "A232", "integration", "pass", "221 tests, 0 failures")
+verify(T(9, 2, "10:55:00"), "payments/staging", "A232", "canary", "pass", "30m canary at 10%: error rate 0.02%", actor="watch:canary")
+plan(T(9, 2, "10:56:00"), "payments/prod", "A232", "A231", (0, 1, 0, 0), note="image only")
+a232 = approve(T(9, 2, "11:00:00"), "payments/prod", "A232", "user:dana", "payments-oncall", "pulumi delivery approve payments/prod",
+               "staging canary clean; the retry path is behind a flag")
+dec232 = decide(T(9, 2, "11:00:05"), "payments/prod", "A232", "policy:payments/prod",
+                "gate satisfied: verified in staging (integration, canary), approved by payments-oncall", [a232])
+started(T(9, 2, "11:01:00"), "A232-payments-prod", "payments/prod", "A232", "payments", "argo:rollouts/payments-api/rev-12", [dec232],
+        record_version=4, strategy="canary (argo-rollouts): 10% → pause until analysed and promoted → 100%")
+phase(T(9, 2, "11:02:00"), "A232-payments-prod", "canary", "canary ReplicaSet healthy; 10% of traffic", actor="watch:argo-rollouts",
+      step=0, weight=10)
+phase(T(9, 2, "11:03:00"), "A232-payments-prod", "paused", "paused at the step gate: AnalysisRun canary-analysis started (30m), promote pending",
+      actor="watch:argo-rollouts", step=1, weight=10)
+observed(T(9, 2, "11:15:00"), "payments/prod", {"payments-stable": "A231", "payments-canary": "A232"})
+# 11:20 — both live, the snapshot inside the pause.
+v_fail = verify(T(9, 2, "11:33:00"), "payments/prod", "A232", "canary-analysis", "fail",
+                "error rate 2.4% vs 0.1% on stable; p99 +480ms — retry storm on gateway timeouts", actor="watch:argo-analysis")
+dec_abort = decide(T(9, 2, "11:33:05"), "payments/prod", "A231", "policy:payments/prod",
+                   "auto-abort: canary analysis failed for A232; intent returns to the stable A231, which prod already carries", [v_fail])
+finished(T(9, 2, "11:33:30"), "A232-payments-prod", "abandoned", refs=[dec_abort],
+         detail="rollout aborted: canary ReplicaSet scaled to 0, weights reset; stable A231 untouched")
+observed(T(9, 2, "11:40:00"), "payments/prod", {"payments-stable": "A231"})
 
 
 # ---------------------------------------------------------------------------

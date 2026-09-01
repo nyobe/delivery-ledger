@@ -43,10 +43,29 @@ SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.slack')           AS slack,
        json_extract(f.payload, '$.upstream')        AS upstream,
        json_extract(f.payload, '$.stacks')          AS stacks,
+       json_extract(f.payload, '$.strategy.kind')   AS strategy,
+       json_extract(f.payload, '$.strategy.steps')  AS strategy_steps,
        f.ts AS declared_at, f.actor AS declared_by, f.id AS fact
 FROM facts f
 WHERE f.kind = 'stage.declared'
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);
+
+-- The steps of a stage's declared rollout strategy, in order. A pause step
+-- carries gate terms — the same vocabulary as a stage gate — that the
+-- executor must see satisfied before it continues: a cutover is a decision
+-- inside the transition, and this is where it is declared.
+CREATE VIEW v_strategy_step AS
+SELECT s.stage, t.key AS idx,
+       CASE WHEN json_extract(t.value, '$.setWeight') IS NOT NULL THEN 'setWeight'
+            WHEN json_extract(t.value, '$.pause')     IS NOT NULL THEN 'pause'
+            WHEN json_extract(t.value, '$.analysis')  IS NOT NULL THEN 'analysis'
+            ELSE 'other' END                           AS kind,
+       json_extract(t.value, '$.setWeight')            AS weight,
+       json_extract(t.value, '$.analysis')             AS analysis,
+       json_extract(t.value, '$.pause.terms')          AS terms,
+       json_extract(t.value, '$.pause.rule')           AS rule
+FROM v_stage s, json_each(s.strategy_steps) t
+WHERE s.strategy_steps IS NOT NULL;
 
 CREATE VIEW v_policy AS
 SELECT substr(f.subject, 7)                         AS stage,
@@ -237,6 +256,17 @@ SELECT s.subject                                    AS transition,
        (SELECT json_extract(p.payload, '$.phase') FROM facts p
          WHERE p.kind = 'transition.phase' AND p.subject = s.subject
          ORDER BY p.seq DESC LIMIT 1)                AS last_phase,
+       -- where a strategy with steps is enacting: the step and traffic weight
+       -- the executor last reported
+       (SELECT json_extract(p.payload, '$.step') FROM facts p
+         WHERE p.kind = 'transition.phase' AND p.subject = s.subject
+         ORDER BY p.seq DESC LIMIT 1)                AS last_step,
+       (SELECT json_extract(p.payload, '$.weight') FROM facts p
+         WHERE p.kind = 'transition.phase' AND p.subject = s.subject AND json_extract(p.payload, '$.weight') IS NOT NULL
+         ORDER BY p.seq DESC LIMIT 1)                AS last_weight,
+       (SELECT p.ts FROM facts p
+         WHERE p.kind = 'transition.phase' AND p.subject = s.subject
+         ORDER BY p.seq DESC LIMIT 1)                AS last_phase_at,
        (SELECT count(*) FROM facts r
          WHERE r.kind = 'resource.step' AND r.subject = s.subject) AS resource_steps,
        s.id AS started_fact, e.id AS finished_fact
@@ -332,27 +362,38 @@ FROM v_freight_transition t
 WHERE t.outcome = 'succeeded' AND t.freight IS NOT NULL
 GROUP BY t.stage, t.freight;
 
--- The incumbent on a stage: what it carries, or — while its stacks disagree —
--- the latest freight that succeeded on any of them.
-CREATE VIEW v_incumbent AS
-SELECT s.stage,
-       coalesce(k.freight, (SELECT t.freight FROM v_freight_transition t
-                             WHERE t.stage = s.stage AND t.outcome = 'succeeded' AND t.freight IS NOT NULL
-                             ORDER BY t.finished_seq DESC LIMIT 1)) AS freight
-FROM v_stage s
-LEFT JOIN v_carried k ON k.stage = s.stage;
-
--- Direction is derived, never written: promoting a freight discovered before
--- the incumbent is a rollback; anything else is forward. Rollback-ness is a
--- relation between two freights at a stage, not a property of a decision.
+-- Direction is derived, never written: a freight discovered before the one
+-- the stage is currently decided to is a rollback; anything else is forward.
+-- Rollback-ness is a relation between two freights at a stage — the same
+-- relation v_reversal reads — not a property of a decision. Relative to
+-- intent rather than to what is carried, so that intent returning to the
+-- stable while a canary is still in flight (an abort) is a rollback too.
 CREATE VIEW v_direction AS
 SELECT s.stage, fr.freight,
-       CASE WHEN inc.discovered_at IS NOT NULL AND fr.discovered_at < inc.discovered_at THEN 'rollback' ELSE 'forward' END AS direction,
-       inc.freight AS incumbent
+       CASE WHEN df.discovered_at IS NOT NULL AND fr.discovered_at < df.discovered_at THEN 'rollback' ELSE 'forward' END AS direction,
+       d.freight AS desired
 FROM v_stage s
 CROSS JOIN v_freight fr
-LEFT JOIN v_incumbent i ON i.stage = s.stage
-LEFT JOIN v_freight inc ON inc.freight = i.freight;
+LEFT JOIN v_desired d  ON d.stage = s.stage
+LEFT JOIN v_freight df ON df.freight = d.freight;
+
+-- What a stage has live right now: the freight it carries (stable) and,
+-- while a rollout is in flight, the freight in flight (canary) — with the
+-- traffic weight the enactment last reported, when it reports one. A
+-- stage carries a set, not a freight, for as long as a transition is open.
+CREATE VIEW v_live AS
+SELECT k.stage, k.freight, 'stable' AS role,
+       CASE WHEN i.freight IS NOT NULL AND i.last_weight IS NOT NULL THEN 100 - i.last_weight
+            WHEN i.freight IS NULL THEN 100 END AS weight,
+       k.since AS since, k.fact
+FROM v_carried k
+LEFT JOIN v_inflight i ON i.stage = k.stage AND i.freight IS NOT NULL AND i.freight <> k.freight
+WHERE k.freight IS NOT NULL
+UNION ALL
+SELECT i.stage, i.freight, 'canary', i.last_weight, i.started_at, i.started_fact
+FROM v_inflight i
+LEFT JOIN v_carried k ON k.stage = i.stage
+WHERE i.freight IS NOT NULL AND i.freight IS NOT k.freight;
 
 -- Verification status per (stage, freight, check): latest outcome wins.
 CREATE VIEW v_verified AS
@@ -449,28 +490,34 @@ WHERE f.kind = 'plan.summarized'
                  AND json_extract(g.payload, '$.against_record') IS NULL
                  AND json_extract(g.payload, '$.freight') = json_extract(f.payload, '$.freight'));
 
--- Conformance reads: what a watch last saw running, compared to intent.
+-- Conformance reads: what a watch last saw running, compared to what the
+-- enactments say is live (v_live) — the carried freight, plus the one in
+-- flight while a rollout is open. Comparing to intent instead would call
+-- every both-live canary drift, and a decided-but-not-yet-enacted stage too.
 CREATE VIEW v_observed AS
 SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.services')        AS services,
        json_extract(f.payload, '$.source')          AS source,
        f.ts, f.id AS fact,
+       (SELECT group_concat(x, ' | ') FROM (SELECT l.freight || ' (' || l.role || coalesce(' ' || l.weight || '%', '') || ')' AS x
+                                             FROM v_live l WHERE l.stage = substr(f.subject, 7) ORDER BY l.role DESC)) AS expected,
        (SELECT count(*) FROM json_each(json_extract(f.payload, '$.services')) je
-         WHERE je.value IS NOT (SELECT d.freight FROM v_desired d WHERE d.stage = substr(f.subject, 7)))
+         WHERE NOT EXISTS (SELECT 1 FROM v_live l WHERE l.stage = substr(f.subject, 7) AND l.freight = je.value))
                                                     AS mismatches,
        (SELECT group_concat(je.key || '@' || je.value, ', ')
           FROM json_each(json_extract(f.payload, '$.services')) je
-         WHERE je.value IS NOT (SELECT d.freight FROM v_desired d WHERE d.stage = substr(f.subject, 7)))
+         WHERE NOT EXISTS (SELECT 1 FROM v_live l WHERE l.stage = substr(f.subject, 7) AND l.freight = je.value))
                                                     AS mismatch_detail
 FROM facts f
 WHERE f.kind = 'state.observed'
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);
 
 CREATE VIEW v_observed_service AS
-SELECT o.stage, je.key AS service, d.freight AS desired, je.value AS observed,
-       (je.value IS d.freight) AS matches, o.ts, o.fact
-FROM v_observed o, json_each(o.services) je
-LEFT JOIN v_desired d ON d.stage = o.stage;
+SELECT o.stage, je.key AS service, o.expected, je.value AS observed,
+       EXISTS (SELECT 1 FROM v_live l WHERE l.stage = o.stage AND l.freight = je.value) AS matches,
+       (SELECT l.role FROM v_live l WHERE l.stage = o.stage AND l.freight = je.value) AS role,
+       o.ts, o.fact
+FROM v_observed o, json_each(o.services) je;
 
 -- Break-glass is the side door: same class (intent), same attribution.
 CREATE VIEW v_breakglass AS
@@ -712,6 +759,64 @@ CROSS JOIN v_freight fr
 JOIN v_direction dr ON dr.stage = s.stage AND dr.freight = fr.freight
 JOIN v_policy p ON p.stage = s.stage;
 
+-- The gate inside a transition: for each open enactment on a stage whose
+-- strategy declares steps, the step the executor last reported, and — when
+-- that step is a pause — its terms evaluated against facts recorded since
+-- the transition started (an analysis for this rollout; a fresh `promote`
+-- approval, not the one that opened the stage gate). Same term types, one
+-- more floor.
+CREATE VIEW v_step_term AS
+SELECT i.transition, i.stage, i.freight, i.last_step AS step, i.started_at, st.idx, t.key AS term_idx,
+       json_extract(t.value, '$.type')  AS type,
+       json_extract(t.value, '$.stage') AS term_stage,
+       json_extract(t.value, '$.check') AS chk,
+       json_extract(t.value, '$.role')  AS role,
+       json_extract(t.value, '$.via')   AS via,
+  CASE json_extract(t.value, '$.type')
+    WHEN 'verified' THEN
+      (SELECT v.ts FROM v_verified v
+        WHERE v.stage = json_extract(t.value, '$.stage') AND v.freight = i.freight AND v.chk = json_extract(t.value, '$.check')
+          AND v.outcome = 'pass' AND v.ts >= i.started_at)
+    WHEN 'approved' THEN
+      (SELECT a.ts FROM v_approval a
+        WHERE a.stage = i.stage AND a.freight = i.freight AND a.role = json_extract(t.value, '$.role') AND a.ts >= i.started_at
+        ORDER BY a.seq DESC LIMIT 1)
+    WHEN 'not_held' THEN
+      CASE WHEN NOT EXISTS (SELECT 1 FROM v_hold_active h WHERE h.stage = i.stage) THEN '' END
+  END AS satisfied_at,
+  CASE json_extract(t.value, '$.type')
+    WHEN 'verified' THEN
+      CASE WHEN EXISTS (SELECT 1 FROM v_verified v WHERE v.stage = json_extract(t.value, '$.stage') AND v.freight = i.freight
+                          AND v.chk = json_extract(t.value, '$.check') AND v.ts >= i.started_at AND v.outcome <> 'pass')
+           THEN 'verification: ' || json_extract(t.value, '$.check') || ' in ' || json_extract(t.value, '$.stage') || ' (' ||
+                (SELECT v.outcome || ' — ' || v.detail FROM v_verified v WHERE v.stage = json_extract(t.value, '$.stage') AND v.freight = i.freight
+                   AND v.chk = json_extract(t.value, '$.check') AND v.ts >= i.started_at) || ')'
+           ELSE 'verification: ' || json_extract(t.value, '$.check') || ' in ' || json_extract(t.value, '$.stage') || ' (running since the rollout started)' END
+    WHEN 'approved' THEN 'approval: ' || json_extract(t.value, '$.role') || coalesce(' (' || json_extract(t.value, '$.via') || ')', '') || ' — given after ' || i.started_at
+    WHEN 'not_held' THEN 'hold until ' || (SELECT h.until_ts FROM v_hold_active h WHERE h.stage = i.stage)
+    ELSE json_extract(t.value, '$.type') || ' is not defined on a step'
+  END AS unmet_text,
+  CASE json_extract(t.value, '$.type')
+    WHEN 'verified' THEN (SELECT v.fact FROM v_verified v WHERE v.stage = json_extract(t.value, '$.stage') AND v.freight = i.freight
+                            AND v.chk = json_extract(t.value, '$.check') AND v.ts >= i.started_at)
+    WHEN 'approved' THEN (SELECT a.fact FROM v_approval a WHERE a.stage = i.stage AND a.freight = i.freight
+                            AND a.role = json_extract(t.value, '$.role') AND a.ts >= i.started_at ORDER BY a.seq DESC LIMIT 1)
+  END AS evidence_fact
+FROM v_inflight i
+JOIN v_strategy_step st ON st.stage = i.stage AND st.idx = i.last_step AND st.kind = 'pause'
+JOIN json_each(st.terms) t;
+
+CREATE VIEW v_step_gate AS
+SELECT i.transition, i.stage, i.freight, i.last_step AS step, i.last_phase, i.last_weight, i.last_phase_at, i.started_at,
+       st.kind AS step_kind, st.rule,
+       (SELECT count(*) FROM v_strategy_step x WHERE x.stage = i.stage) AS n_steps,
+       (SELECT count(*) FROM v_step_term g WHERE g.transition = i.transition) AS n_terms,
+       (SELECT count(*) FROM v_step_term g WHERE g.transition = i.transition AND g.satisfied_at IS NULL) AS n_unmet,
+       ((SELECT count(*) FROM v_step_term g WHERE g.transition = i.transition AND g.satisfied_at IS NULL) = 0) AS passes,
+       (SELECT g.unmet_text FROM v_step_term g WHERE g.transition = i.transition AND g.satisfied_at IS NULL ORDER BY g.term_idx LIMIT 1) AS awaiting
+FROM v_inflight i
+JOIN v_strategy_step st ON st.stage = i.stage AND st.idx = i.last_step;
+
 -- The gate as it applies to each stage's candidate.
 CREATE VIEW v_gate_eval AS
 SELECT g.*, c.available_at, c.source, c.requested_by, c.request_incident, c.request_fact,
@@ -732,7 +837,10 @@ SELECT s.ord, s.stage, s.program, s.environment, s.region, s.owner, s.url, s.ops
        k.freight AS carried, k.since AS carried_since, k.ops_update,
        k.n_stacks, k.n_stacks_carrying, k.stacks_detail,
        i.transition AS inflight, i.freight AS inflight_freight, i.last_phase, i.started_at AS inflight_since,
-       i.n_inflight, i.inflight_detail,
+       i.n_inflight, i.inflight_detail, i.last_step, i.last_weight,
+       sg.step_kind, sg.n_steps, sg.passes AS step_passes, sg.awaiting AS step_awaiting,
+       (SELECT group_concat(x, ' | ') FROM (SELECT l.freight || ' ' || l.role || coalesce(' ' || l.weight || '%', '') AS x
+                                             FROM v_live l WHERE l.stage = s.stage ORDER BY l.role DESC)) AS live,
        lf.outcome AS last_outcome, lf.freight AS last_outcome_freight, lf.finished_at AS last_outcome_at,
        lf.error AS last_error, lf.transition AS last_transition, lf.failed_step, lf.step_url,
        ge.freight AS candidate, ge.passes, ge.awaiting, ge.awaiting_type, ge.awaiting_since,
@@ -773,6 +881,7 @@ LEFT JOIN v_freight       df ON df.freight = d.freight
 LEFT JOIN v_freight       pf ON pf.freight = dd.from_freight
 LEFT JOIN v_carried       k  ON k.stage  = s.stage
 LEFT JOIN v_inflight      i  ON i.stage  = s.stage
+LEFT JOIN v_step_gate     sg ON sg.transition = i.transition
 LEFT JOIN v_last_finished lf ON lf.stage = s.stage
 LEFT JOIN v_gate_eval     ge ON ge.stage = s.stage
 LEFT JOIN v_observed      o  ON o.stage  = s.stage
@@ -1235,19 +1344,16 @@ WHERE fr.cut_at IS NOT NULL;
 -- view parameterised by T (smells.md).
 CREATE VIEW v_audit_ctx AS
 SELECT d.fact AS decision, d.stage, d.freight, d.ts, d.seq, d.actor,
-       -- the incumbent when the decision was written: the latest successful
-       -- freight enactment on the stage at or before then
-       inc.freight AS incumbent,
-       CASE WHEN inc.discovered_at IS NOT NULL AND f.discovered_at < inc.discovered_at THEN 'rollback' ELSE 'forward' END AS direction,
+       -- what the stage was decided to before this decision
+       d.from_freight,
+       CASE WHEN pf.discovered_at IS NOT NULL AND f.discovered_at < pf.discovered_at THEN 'rollback' ELSE 'forward' END AS direction,
        -- when intent had last moved off this freight, as of the decision
        (SELECT max(o.ts) FROM v_decision o
          WHERE o.stage = d.stage AND o.freight <> d.freight AND o.seq < d.seq
            AND o.seq > (SELECT min(p.seq) FROM v_decision p WHERE p.stage = d.stage AND p.freight = d.freight)) AS moved_at
 FROM v_decision d
 JOIN v_freight f ON f.freight = d.freight
-LEFT JOIN v_freight inc ON inc.freight = (SELECT o.freight FROM v_freight_transition o
-                                           WHERE o.stage = d.stage AND o.outcome = 'succeeded' AND o.freight IS NOT NULL
-                                             AND o.finished_at <= d.ts ORDER BY o.finished_seq DESC LIMIT 1);
+LEFT JOIN v_freight pf ON pf.freight = d.from_freight;
 
 CREATE VIEW v_audit_term AS
 SELECT c.decision, c.stage, c.freight, c.ts, c.direction, t.idx, t.type, t.role,
@@ -1283,7 +1389,7 @@ SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.freight')         AS freight,
        f.ts, f.actor, f.rationale, f.id AS fact,
        json_array_length(f.refs)                    AS n_refs,
-       c.direction, c.incumbent,
+       c.direction, c.from_freight,
        CASE WHEN c.direction = 'rollback' THEN coalesce(p.rollback_mode, p.mode) ELSE p.mode END AS mode,
        (SELECT count(*) FROM v_audit_term x WHERE x.decision = f.id)                              AS n_required,
        (SELECT count(*) FROM v_audit_term x WHERE x.decision = f.id AND x.satisfied_by IS NULL)   AS n_unmet,

@@ -445,6 +445,14 @@ def screen_grid(db, as_of):
             detail = f'{mono(r["inflight"])} · {mono(r["inflight_freight"])}' + (f' · phase <b>{esc(r["last_phase"])}</b>' if r["last_phase"] else "") + f' · since {esc(fmt_ts(r["inflight_since"]))}'
             if r["n_inflight"] and r["n_inflight"] > 1:
                 detail += f'<div class="muted small">{esc(r["n_inflight"])} legs in flight: {esc(r["inflight_detail"])}</div>'
+            if r["step_kind"]:
+                detail += f'<div class="small">step {esc(r["last_step"] + 1)}/{esc(r["n_steps"])} ({esc(r["step_kind"])})'
+                if r["step_kind"] == "pause":
+                    detail += (f' · {chip("ready", "step gate passes")}' if r["step_passes"]
+                               else f' · {chip("awaiting", "awaiting")} <span class="amber-text">{esc(r["step_awaiting"])}</span>')
+                detail += "</div>"
+            if r["live"]:
+                detail += f'<div class="small muted">live: {esc(r["live"])}</div>'
         elif st == "superseded":
             detail = f'{mono(r["inflight"])} still enacting {mono(r["inflight_freight"])}; decision moved to {mono(r["desired"])} at {esc(fmt_ts(r["decided_at"]))}'
         elif st == "failed":
@@ -547,9 +555,31 @@ def screen_lanes(db, as_of):
     return section("lanes", "1 · freight lanes", "Freight × stage", blurb, "".join(parts), sql_block(db, "v_lanes"))
 
 
+def screen_step_gates(db, as_of):
+    """Gates inside transitions: a pause step's terms, for every open rollout paused on one."""
+    parts, heads = [], []
+    for g in q(db, "SELECT sg.*, s.ord FROM v_step_gate sg JOIN v_stage s ON s.stage = sg.stage WHERE sg.step_kind = 'pause' ORDER BY s.ord"):
+        rows = []
+        for t in q(db, "SELECT * FROM v_step_term WHERE transition=? ORDER BY term_idx", g["transition"]):
+            if t["satisfied_at"] is not None:
+                rows.append([chip("converged", "met", "ok"), esc(t["type"] + (f': {t["chk"]}' if t["chk"] else f': {t["role"]}' if t["role"] else "")),
+                             esc(fmt_ts(t["satisfied_at"])), fact_ref(t["evidence_fact"])])
+            else:
+                rows.append([chip("awaiting", "open"), esc(t["type"] + (f': {t["chk"]}' if t["chk"] else f': {t["role"]}' if t["role"] else "")),
+                             f'<span class="muted">{esc(t["unmet_text"])}</span>', "the rollout holds at this step while it waits"])
+        verdict = ('passes — the executor may continue.' if g["passes"]
+                   else f'does not pass — awaiting <b>{esc(g["awaiting"])}</b> for <b>{esc(fmt_since(g["last_phase_at"], as_of))}</b> (paused since {esc(fmt_ts(g["last_phase_at"]))}).')
+        heads.append(f'{g["stage"]}: {mono(g["freight"])} paused at step {g["step"] + 1}/{g["n_steps"]}')
+        parts.append(f'<h3>{esc(g["stage"])} <span class="muted">· {mono(g["transition"])} · step {esc(g["step"] + 1)}/{esc(g["n_steps"])} · '
+                     f'{esc(g["last_weight"])}% canary</span></h3><p class="lede"><code>{esc(g["rule"])}</code><br>{verdict}</p>'
+                     + table(["", "term", "satisfied", "evidence"], rows))
+    return parts, heads
+
+
 def screen_gates(db, as_of):
     waiting = q(db, "SELECT * FROM v_grid WHERE status IN ('awaiting','held','ready') ORDER BY ord")
-    if not waiting:
+    step_parts, step_heads = screen_step_gates(db, as_of)
+    if not waiting and not step_parts:
         return section("gates", "2 · awaiting ≠ failure", "No gate is waiting right now",
                        "Every stage's candidate is either its current freight or in flight.", "", sql_block(db, "v_gate_term", "v_gate"))
     parts, heads = [], []
@@ -580,11 +610,15 @@ def screen_gates(db, as_of):
                          + (f'; requested by {esc(g["requested_by"])}' if g["candidate_source"] == "rollback request" else ""))
         parts.append(f'<h3>{esc(g["stage"])} <span class="muted">· policy {esc(gate["mode"])}{direction}</span></h3>'
                      f'<p class="lede"><code>{esc(gate["rule"])}</code><br>{verdict}</p>' + table(["", "term", "satisfied", "evidence"], rows))
-    return section("gates", "2 · awaiting ≠ failure", " · ".join(esc(h) for h in heads),
+    if step_parts:
+        parts.append('<h3 class="muted">Inside a transition</h3><p class="lede">A rollout paused on a step gate: the same term '
+                     'vocabulary, floored at the instant the rollout started — the approval that opened the stage gate does not '
+                     'also promote the canary.</p>' + "".join(step_parts))
+    return section("gates", "2 · awaiting ≠ failure", " · ".join(esc(h) for h in heads + step_heads),
                    "Gates are queries over both fact classes, evaluated at rest — each term is a row here, with the "
                    "fact that satisfies it or the reason it doesn't. An unmet term makes the stage <em>awaiting</em>: "
                    "an honest open item with a duration, not a failed run. Nothing is running while it waits.",
-                   "".join(parts), sql_block(db, "v_gate_term", "v_gate"))
+                   "".join(parts), sql_block(db, "v_gate_term", "v_gate", "v_step_term", "v_step_gate"))
 
 
 def screen_trace(db, as_of):
@@ -902,10 +936,10 @@ def screen_outofband(db, as_of):
         bg = one(db, "SELECT bg.* FROM v_breakglass bg LEFT JOIN v_carried k ON k.stage=bg.stage WHERE bg.stage=? AND bg.ts > coalesce(k.since,'')", o["stage"])
         rows = []
         for svc in q(db, "SELECT * FROM v_observed_service WHERE stage=? ORDER BY service", o["stage"]):
-            rows.append([mono(svc["service"]), mono(svc["desired"]), mono(svc["observed"]),
+            rows.append([mono(svc["service"]), esc(svc["expected"]), mono(svc["observed"]) + (f' <span class="small muted">{esc(svc["role"])}</span>' if svc["role"] else ""),
                          chip("converged", "matches") if svc["matches"] else chip("failed", "differs", "bad")])
         body = (f'<h3>{esc(o["stage"])} <span class="muted">· read {esc(fmt_ts(o["ts"]))} · {esc(o["source"])} {fact_ref(o["fact"])}</span></h3>'
-                + table(["service", "should run", "runs", ""], rows))
+                + table(["service", "live per the enactments", "runs", ""], rows))
         if o["mismatches"] and bg:
             heads.append(f'{o["stage"]}: drift explained by {bg["incident"]}')
             body += (f'<div class="callout"><span class="cls intent">intent</span> <b>break-glass</b> {fact_ref(bg["fact"])} · '
@@ -967,7 +1001,7 @@ def screen_transitions(db, as_of):
         for f in facts:
             p = json.loads(f["payload"])
             what = {"transition.started": f'started' + (f' · {esc(p.get("strategy"))}' if p.get("strategy") else ""),
-                    "transition.phase": f'phase <b>{esc(p.get("phase"))}</b> — {esc(p.get("detail"))}',
+                    "transition.phase": f'phase <b>{esc(p.get("phase"))}</b>' + (f' · step {esc(p["step"] + 1)}' if p.get("step") is not None else "") + (f' · {esc(p["weight"])}% canary' if p.get("weight") is not None else "") + f' — {esc(p.get("detail"))}',
                     "resource.step": f'{esc(p.get("op"))} {mono(p.get("type"))}<div class="small muted">{esc(p.get("urn"))}</div>' + (f'<div class="small bad-text">{esc(p.get("error"))}</div>' if p.get("error") else ""),
                     "transition.finished": f'finished · <b>{esc(p.get("outcome"))}</b>' + (f' · update #{esc(p.get("ops_update"))}' if p.get("ops_update") else "") + (f' · {esc(json.dumps(p.get("summary")))}' if p.get("summary") else "") + (f'<div class="small">{esc(p.get("error") or p.get("detail"))}</div>' if p.get("error") or p.get("detail") else ""),
                     }.get(f["kind"], esc(f["kind"]))
@@ -1000,7 +1034,7 @@ def screen_audit(db, as_of):
             if d["unmet"]:
                 approvals += f'<div class="small bad-text">unmet: {esc(d["unmet"])}</div>'
         rows.append([esc(fmt_ts(d["ts"])), f'<b>{esc(d["stage"])}</b> ← {mono(d["freight"])}'
-                     + (f'<div class="small amber-text">rollback from {mono(d["incumbent"])}</div>' if d["direction"] == "rollback" else ""), esc(d["actor"]),
+                     + (f'<div class="small amber-text">rollback from {mono(d["from_freight"])}</div>' if d["direction"] == "rollback" else ""), esc(d["actor"]),
                      approvals, esc(d["n_refs"]),
                      (f'<span class="chip bad"><span class="glyph">⚠</span>{esc(d["flag"])}</span>' if d["flag"] else chip("converged", "clean")),
                      fact_ref(d["fact"])])

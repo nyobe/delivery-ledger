@@ -205,7 +205,7 @@ def self_checks(check, H, facts):
           and one(db, "SELECT approved_at FROM v_release_stage WHERE freight='F417' AND stage='production'")["approved_at"] == "2026-08-27T11:05:00Z")
     check("audit: the rollback decision is a policy decision in the rollback direction, from incumbent F418, with its approval-bearing term met; nothing flagged", R2,
           lambda db: q(db, "SELECT * FROM v_audit_flag WHERE flag IS NOT NULL") == []
-          and (lambda r: r["direction"] == "rollback" and r["incumbent"] == "F418" and r["mode"] == "auto-if-safe" and r["n_required"] == 1 and r["n_unmet"] == 0)
+          and (lambda r: r["direction"] == "rollback" and r["from_freight"] == "F418" and r["mode"] == "auto-if-safe" and r["n_required"] == 1 and r["n_unmet"] == 0)
           (one(db, "SELECT * FROM v_audit_flag WHERE stage='production' AND freight='F417' AND ts='2026-08-27T11:05:05Z'")))
     check("transition: the rollback enactment ran no Pulumi update and cites the rollback decision", R2,
           lambda db: (lambda r: r["ops_update"] is None and r["outcome"] == "succeeded" and r["resource_steps"] == 5 and r["strategy"].startswith("ecs UpdateService"))
@@ -245,11 +245,15 @@ def self_checks(check, H, facts):
           and grid(db, "testing-eu")["status"] == "pending")
 
     # --- every policy-written decision passed its gate at its own instant ------
+    # The ledger as it stood when the decision was written: everything up to
+    # that instant except the decision itself (which would already have moved
+    # intent, and with it the pair's direction).
     for f in facts:
         if f["kind"] == "promotion.decided" and f["actor"].startswith("policy:"):
             stage, freight = f["subject"][6:], f["payload"]["freight"]
             check(f"policy decision {f['id']} ({stage} ← {freight}) passed its gate when written", f["ts"],
-                  (lambda s, fr: lambda db: one(db, "SELECT passes FROM v_gate WHERE stage=? AND freight=?", s, fr)["passes"] == 1)(stage, freight))
+                  (lambda s, fr: lambda db: one(db, "SELECT passes FROM v_gate WHERE stage=? AND freight=?", s, fr)["passes"] == 1)(stage, freight),
+                  (lambda fid: lambda fs: fs.remove(find(fs, id=fid)))(f["id"]))
 
     # --- mutations: break one mechanism, expect the views to say so -------------
     def m_verify_before_deploy(fs):

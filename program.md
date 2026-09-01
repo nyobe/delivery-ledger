@@ -122,7 +122,16 @@ export default d.program("payments", {
     prod:    d.stage({ environment: "prod",    upstream: "staging",
                        promote: d.gated({ requires: [d.verified("staging", "integration"),
                                                      d.verified("staging", "canary"),
-                                                     d.approved({ role: "payments-oncall" })] }) }),
+                                                     d.approved({ role: "payments-oncall" })] }),
+                       // Returning prod to something it ran before needs no one; a failed
+                       // canary analysis writes this decision by itself.
+                       rollback: d.auto({ requires: [d.carriedBefore()] }),
+                       // How prod is enacted: a canary with a pause the executor may only
+                       // leave once these terms hold — facts recorded since the rollout began.
+                       strategy: d.canary({ steps: [d.setWeight(10),
+                                                    d.pause({ until: [d.verified("prod", "canary-analysis"),
+                                                                      d.approved({ role: "payments-oncall", via: "promote" })] }),
+                                                    d.setWeight(100)] }) }),
   },
 
   // Bindings are patterns: declared once, instantiated per environment.
@@ -174,7 +183,9 @@ pulumi delivery pin k8s-1.31 --member platform=P12 --member payments=A231 --orde
 | **a person** | takes up a published record on a gated edge, or approves one | intent · `uptake.decided` / `approval.granted` · `edge:<…>` — record version, role |
 | **a bot's PR merge** | the bump PR for a by-version pin lands | intent · `uptake.decided` · `edge:<…>` — record version, the PR; the next `freight.discovered` carries the pin in its config |
 | **whoever proposes a release across programs** | `pulumi delivery pin …` | intent · `release.pinned` · `release:<name>` — one member freight per program, an order, a reason |
-| **executor** | starts / progresses / finishes an enactment | observation · `transition.started` / `.phase` / `.finished` · `transition:<T>` — outcome `succeeded`, `failed` (with step and error), or `abandoned` (refs the superseding decision); `resource.step` at whatever grain the executor emits |
+| **executor** | starts / progresses / finishes an enactment | observation · `transition.started` / `.phase` / `.finished` · `transition:<T>` — outcome `succeeded`, `failed` (with step and error), or `abandoned` (refs the superseding decision); `resource.step` at whatever grain the executor emits. Under a strategy with steps, a phase carries the `step` index and the traffic `weight` |
+| **program apply** | the stage declares how it is enacted | intent · `stage.declared` · `stage:<s>` — `strategy.steps`, a pause step carrying `terms` (the cutover gate inside the transition; `v_step_gate` evaluates it against facts since the rollout started) |
+| **policy engine** | a step-gate verification fails, under a `rollback: auto` block | intent · `promotion.decided` · `stage:<s>` — back to the stable freight, refs the failed verification; the executor abandons the rollout citing it |
 | **verification watch** | an external check concludes | observation · `verification.recorded` · `stage:<s>` — freight, check, outcome |
 | **planner** | a preview runs (on candidacy, or ahead of it) | observation · `plan.summarized` · `stage:<s>` — counts, migrations touched, baseline |
 | **planner** | a hyper-preview: the consumer against a proposed record | observation · `plan.summarized` · `stage:<s>` — with `against_record: {producer, version}`; read by the edge's `plan_safe_or_approved` term, never by the stage gate |
@@ -197,7 +208,9 @@ with a gate in it.
 Declarations that write no fact in this slice: `enact:` and `verify:`.
 Their content shows up only through what executors and watches later
 observe; whether the *declaration* of an executor or a check deserves a
-subject of its own is open.
+subject of its own is open. `strategy:` is the one enactment detail that
+does write a fact, because the tracker needs it: a pause step's terms are
+what "paused, awaiting X" means, and only a declaration can say that.
 
 ## What annotations are
 

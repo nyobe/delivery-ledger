@@ -47,10 +47,10 @@ and the sharper statement of why it is there (smells.md #18).
 | file | role |
 |---|---|
 | `schema.sql` | the `facts` table (plus a one-row `clock`) — the only state |
-| `views.sql` | every screen as a view: subjects → current state → gate terms → grid, lanes, trace, uptake, releases, audit — shared by every scenario |
+| `views.sql` | every screen as a view: subjects → current state → direction, gate terms, step gates, the live set → grid, lanes, trace, uptake, releases, audit — shared by every scenario |
 | `render.py` | lint → self-checks (including mutation checks) → HTML; holds no state of its own |
 | `scenarios/<name>/fixture.py` | a scenario as a timeline; emits `facts.jsonl` beside it so one story can't drift into two |
-| `scenarios/<name>/facts.jsonl` | the ledger for that scenario (pulumi-service: 158 facts across two weeks; multistack: 143 facts across two programs) |
+| `scenarios/<name>/facts.jsonl` | the ledger for that scenario (pulumi-service: 158 facts across two weeks; multistack: 164 facts across two programs) |
 | `scenarios/<name>/scenario.py` | the scenario's page chrome, snapshot instants, and self-checks |
 | `program.md` | the authoring side: what a delivery program *declares*, and which facts each declaration writes |
 | `smells.md` | the acceptance log: anywhere a view wanted state the ledger doesn't hold, and what the slice taught |
@@ -164,6 +164,23 @@ a pin-set across both teams. It adds, over the same views:
   leg retried by the executor against the standing decision (no second
   decision, nothing for the audit to flag).
 
+Wednesday adds **a canary, paused and then aborted**. payments/prod's stage
+declares a rollout strategy as steps (Argo Rollouts' shape: set 10%, pause,
+set 100%), and the pause step carries gate terms — the same vocabulary as a
+stage gate, floored at the rollout's start: the analysis for *this* rollout,
+a `promote` approval given *after* it began. A232 reaches prod under the
+ordinary gate; the enactment reports phases with a step and a weight; for
+the length of the pause the stage carries a *set* — `v_live`: A231 stable
+at 90%, A232 canary at 10% — and the conformance watch, which reports both
+ReplicaSets, matches the set rather than being called drift. The analysis
+fails; the policy's rollback block (`auto`, `previously_carried`) writes
+intent back to A231 with no one involved; the executor abandons the rollout
+citing that decision. The abort is the same reversal as Thursday's
+`prod-rollback` in the other scenario — intent moving to an older freight —
+so A232 reads *rolled back* in lanes and trace though it never carried, and
+its stage-gate approval lapses with the abort: nothing re-fires the canary
+until someone approves it again.
+
 Everything in it is illustrative: teams, stacks, PR numbers, timings and
 error texts are invented to exercise the mechanism, not taken from a real
 pipeline. The *shapes* come from the notebook's record: Tyler's VPC →
@@ -231,9 +248,9 @@ so rather than passing them.
   `awaiting`/`drifted`/`converged`/`held`/`superseded` values anywhere;
 - every policy-written promotion decision passed its gate at the instant it
   was written (the ledger rebuilt at each decision's own timestamp);
-- the scenario's self-checks pass (85 for pulumi-service, 61 for
+- the scenario's self-checks pass (85 for pulumi-service, 78 for
   multistack), each pinning something a view must *include and exclude* at
-  one instant — and eighteen (thirteen) of them are **mutation checks**. For
+  one instant — and eighteen (twenty) of them are **mutation checks**. For
   pulumi-service: the fixture is altered in memory (a verification moved before
   its deployment; a verification for a freight the stage never carried; an
   approval by the wrong role; a decision written by a person; an approval
@@ -252,7 +269,12 @@ so rather than passing them.
   wrong role; a preview flipped to safe; a hold on the consumer stage; the
   within-team auto uptake removed; the prod cluster leg left open; the pin
   removed from every freight; a payments build attributed to the platform
-  warehouse. A SELECT cannot stay green with its mechanism broken.
+  warehouse; and for the canary — a passing analysis and a promote after
+  the rollout started (the step gate opens); an analysis from before it
+  started (it does not); the canary observed running a third freight; the
+  weights dropped from the phase facts; prod's rollback block removed; the
+  abort's evidence removed; a fresh approval after the abort. A SELECT
+  cannot stay green with its mechanism broken.
 
 The scenario keeps one figure in one place: the timeline in `fixture.py`
 writes each timestamp once; counts and states in the page are derived.
@@ -356,6 +378,7 @@ and commit subjects. Status here:
 | "yours" filter | client-side over `author` — unchanged |
 | cut / close release buttons | intent doors: `release.cut` is a fact; a button would write one; `release.closed` is not modelled |
 | `cmd/prod-rollback` (lookback, migration check, `UpdateService`, US/EU) | `rollback.requested` + a backward `plan.summarized` + the policy's `rollback:` terms; the enactment records no Pulumi update and the grid shows the engine's last enactment beside what runs |
+| "a stack should be able to exist at two versions at once" (braindump) | `v_live`: the carried freight and the in-flight one, with the weight the enactment last reported; conformance compares to the set; the pause step's terms are the cutover decision inside the transition (multistack, payments/prod) |
 
 Keith's own list of what DaC would need to provide (from the tracker
 investigation): a stage-progression entity → `transition` + `promotion.decided`;

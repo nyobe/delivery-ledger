@@ -29,6 +29,8 @@ SNAPSHOTS = [
     ("2026-09-01T11:10:00Z",  "Tue 11:10 — payments/staging: the cluster record's preview is not safe; uptake waits"),
     ("2026-09-01T14:21:15Z",  "Tue 14:21 — platform/prod between legs: network at P12, cluster still P11"),
     ("2026-09-02T09:00:00Z",  "Wed 09:00 — everything converged; k8s 1.31 complete in every environment"),
+    ("2026-09-02T11:20:00Z",  "Wed 11:20 — payments/prod both live: A231 stable at 90%, A232 canary at 10%, paused on the step gate"),
+    ("2026-09-02T11:45:00Z",  "Wed 11:45 — the canary analysis failed; the rollout auto-aborted, A231 untouched, A232 rolled back before it ever carried"),
 ]
 
 E_PROD = "edge:payments@payments/prod<-cluster@platform/prod.cluster_endpoint"
@@ -159,12 +161,57 @@ def self_checks(check, H, facts):
     check("as of Tue 13:00: platform/prod × P12 waits only on platform-oncall — both staging verifications count after the retried cluster leg", "2026-09-01T13:00:00Z",
           lambda db: (lambda r: r["status"] == "awaiting" and r["awaiting"] == "approval: platform-oncall" and r["candidate"] == "P12")(grid(db, "platform/prod")))
 
+    # --- the canary: both live inside the pause, then the abort ---------------------
+    K1 = "2026-09-02T11:20:00Z"
+    check("as of Wed 11:20: payments/prod is in flight, paused on step 2 of 3 with the step gate awaiting the analysis; carried is still A231", K1,
+          lambda db: (lambda r: r["status"] == "in-flight" and r["inflight_freight"] == "A232" and r["carried"] == "A231" and r["desired"] == "A232"
+                      and r["last_phase"] == "paused" and r["last_step"] == 1 and r["last_weight"] == 10
+                      and r["step_kind"] == "pause" and r["n_steps"] == 3 and r["step_passes"] == 0
+                      and r["step_awaiting"].startswith("verification: canary-analysis in payments/prod"))
+          (grid(db, "payments/prod")))
+    check("as of Wed 11:20: the stage carries a set — A231 stable at 90%, A232 canary at 10% — and the conformance read matches both", K1,
+          lambda db: [(r["freight"], r["role"], r["weight"]) for r in q(db, "SELECT * FROM v_live WHERE stage='payments/prod' ORDER BY role DESC")]
+          == [("A231", "stable", 90), ("A232", "canary", 10)]
+          and grid(db, "payments/prod")["live"] == "A231 stable 90% | A232 canary 10%"
+          and (lambda r: r["mismatches"] == 0 and r["expected"] == "A231 (stable 90%) | A232 (canary 10%)")(one(db, "SELECT * FROM v_observed WHERE stage='payments/prod'"))
+          and one(db, "SELECT role FROM v_observed_service WHERE stage='payments/prod' AND service='payments-canary'")["role"] == "canary"
+          and grid(db, "payments/prod")["drift"] is None)
+    check("as of Wed 11:20: the step gate's terms are floored at the rollout's start — the stage-gate approval from 11:00 does not promote the canary", K1,
+          lambda db: [(r["type"], r["satisfied_at"]) for r in q(db, "SELECT type, satisfied_at FROM v_step_term ORDER BY term_idx")]
+          == [("verified", None), ("approved", None)]
+          and one(db, "SELECT unmet_text FROM v_step_term WHERE type='approved'")["unmet_text"].endswith("given after 2026-09-02T11:01:00Z"))
+    check("as of Wed 11:20: lanes and trace say in flight for A232 / #4440 at prod; the pin-set is still complete in prod (A231 carried)", K1,
+          lambda db: one(db, "SELECT cell FROM v_lanes WHERE freight='A232' AND stage='payments/prod'")["cell"] == "in-flight"
+          and one(db, "SELECT cell FROM v_trace_cell WHERE pr=4440 AND stage='payments/prod'")["cell"] == "in-flight"
+          and one(db, "SELECT state FROM v_pinset_status WHERE environment='prod'")["state"] == "complete")
+    K2 = "2026-09-02T11:45:00Z"
+    check("as of Wed 11:45: the abort is a reversal — desired back to A231, which prod carries; A232 rolled back before it ever carried; its approval lapsed", K2,
+          lambda db: (lambda r: r["desired"] == "A231" and r["carried"] == "A231" and r["carried_since"] == "2026-09-01T16:35:00Z"
+                      and r["rolled_back_from"] == "A232" and r["rolled_back_at"] == "2026-09-02T11:33:05Z"
+                      and r["live"] == "A231 stable 100%" and r["drift"] is None
+                      and r["status"] == "awaiting" and r["candidate"] == "A232" and r["awaiting_type"] == "approved"
+                      and r["awaiting_since"] == "2026-09-02T11:33:05Z")
+          (grid(db, "payments/prod"))
+          and one(db, "SELECT passes FROM v_gate WHERE stage='payments/prod' AND freight='A232'")["passes"] == 0
+          and (lambda r: r["cell"] == "rolled-back" and r["last_outcome"] == "abandoned" and r["reached_at"] is None and r["rolled_back_to"] == "A231")
+          (one(db, "SELECT * FROM v_lanes WHERE freight='A232' AND stage='payments/prod'"))
+          and one(db, "SELECT cell FROM v_trace_cell WHERE pr=4440 AND stage='payments/prod'")["cell"] == "rolled-back")
+    check("as of Wed 11:45: the auto-abort decision is a policy decision in the rollback direction under prod's rollback block (no approval needed), citing the failed analysis; nothing flagged", K2,
+          lambda db: q(db, "SELECT * FROM v_audit_flag WHERE flag IS NOT NULL") == []
+          and (lambda r: r["direction"] == "rollback" and r["from_freight"] == "A232" and r["mode"] == "auto" and r["n_required"] == 0 and r["n_refs"] == 1)
+          (one(db, "SELECT * FROM v_audit_flag WHERE stage='payments/prod' AND freight='A231' AND ts='2026-09-02T11:33:05Z'"))
+          and (lambda r: r["outcome"] == "abandoned" and r["last_weight"] == 10)(one(db, "SELECT * FROM v_transition WHERE transition='transition:A232-payments-prod'")))
+
     # --- every policy-written decision passed its gate at its own instant ------------
+    # The ledger as it stood when the decision was written: everything up to
+    # that instant except the decision itself (which would already have moved
+    # intent, and with it the pair's direction).
     for f in facts:
         if f["kind"] == "promotion.decided" and f["actor"].startswith("policy:"):
             stage, freight = f["subject"][6:], f["payload"]["freight"]
             check(f"policy decision {f['id']} ({stage} ← {freight}) passed its gate when written", f["ts"],
-                  (lambda s, fr: lambda db: one(db, "SELECT passes FROM v_gate WHERE stage=? AND freight=?", s, fr)["passes"] == 1)(stage, freight))
+                  (lambda s, fr: lambda db: one(db, "SELECT passes FROM v_gate WHERE stage=? AND freight=?", s, fr)["passes"] == 1)(stage, freight),
+                  (lambda fid: lambda fs: fs.remove(find(fs, id=fid)))(f["id"]))
         if f["kind"] == "uptake.decided" and f["actor"] == "policy:uptake":
             edge, version = f["subject"], f["payload"]["record_version"]
             check(f"policy uptake {f['id']} ({edge.split('<-')[0][5:]} ← v{version}) passed its edge gate when written", f["ts"],
@@ -275,3 +322,52 @@ def self_checks(check, H, facts):
           lambda db: one(db, "SELECT count(*) AS n FROM v_membership WHERE warehouse='platform' AND pr=4428 AND freight='P12'")["n"] == 1
           and one(db, "SELECT reached_at FROM v_trace WHERE pr=4428 AND freight='P12' AND stage='platform/prod'")["reached_at"] == "2026-09-01T14:50:00Z",
           m_cross_program_pr)
+
+    # --- canary mutations ---------------------------------------------------------------
+    def m_promote(fs):
+        fs.append({"id": "m020", "ts": "2026-09-02T11:25:00Z", "class": "observation", "kind": "verification.recorded", "subject": "stage:payments/prod",
+                   "actor": "watch:argo-analysis", "payload": {"freight": "A232", "check": "canary-analysis", "outcome": "pass", "detail": "error rate 0.1%; p99 flat"}})
+        fs.append({"id": "m021", "ts": "2026-09-02T11:28:00Z", "class": "intent", "kind": "approval.granted", "subject": "stage:payments/prod",
+                   "actor": "user:dana", "payload": {"freight": "A232", "role": "payments-oncall", "via": "kubectl argo rollouts promote payments-api"}, "rationale": "analysis clean; promote"})
+    check("mutation: a passing analysis and a promote given after the rollout started open the step gate — the executor may continue", "2026-09-02T11:30:00Z",
+          lambda db: (lambda r: r["status"] == "in-flight" and r["step_passes"] == 1)(grid(db, "payments/prod"))
+          and one(db, "SELECT evidence_fact FROM v_step_term WHERE type='approved'")["evidence_fact"] == "m021", m_promote)
+
+    def m_stale_analysis(fs):
+        fs.append({"id": "m022", "ts": "2026-09-02T10:50:00Z", "class": "observation", "kind": "verification.recorded", "subject": "stage:payments/prod",
+                   "actor": "watch:argo-analysis", "payload": {"freight": "A232", "check": "canary-analysis", "outcome": "pass", "detail": "a run from before the rollout"}})
+    check("mutation: an analysis recorded before the rollout started does not satisfy the step gate", K1,
+          lambda db: (lambda r: r["step_passes"] == 0 and r["step_awaiting"].startswith("verification: canary-analysis"))(grid(db, "payments/prod")), m_stale_analysis)
+
+    def m_wrong_canary(fs):
+        find(fs, kind="state.observed", subject="stage:payments/prod", ts="2026-09-02T11:15:00Z")["payload"]["services"]["payments-canary"] = "A230"
+    check("mutation: a canary running something neither carried nor in flight is drift, unexplained", K1,
+          lambda db: (lambda r: r["mismatches"] == 1 and r["mismatch_detail"] == "payments-canary@A230")(one(db, "SELECT * FROM v_observed WHERE stage='payments/prod'"))
+          and grid(db, "payments/prod")["drift"].endswith("UNEXPLAINED"), m_wrong_canary)
+
+    def m_no_weights(fs):
+        for f in fs:
+            if f["kind"] == "transition.phase" and f["subject"] == "transition:A232-payments-prod":
+                f["payload"].pop("weight", None)
+    check("mutation: without reported weights the live set is still both freights — conformance is on the set, weights are decoration", K1,
+          lambda db: grid(db, "payments/prod")["live"] == "A231 stable | A232 canary"
+          and one(db, "SELECT mismatches FROM v_observed WHERE stage='payments/prod'")["mismatches"] == 0, m_no_weights)
+
+    def m_no_rollback_block(fs):
+        find(fs, kind="policy.declared", subject="stage:payments/prod")["payload"].pop("rollback")
+    check("mutation: without prod's rollback block the auto-abort is judged by the forward gate, whose approval for A231 lapsed — the audit flags it", K2,
+          lambda db: (lambda r: r["flag"] == "unmet at decision time: approval: payments-oncall")
+          (one(db, "SELECT * FROM v_audit_flag WHERE stage='payments/prod' AND freight='A231' AND ts='2026-09-02T11:33:05Z'")), m_no_rollback_block)
+
+    def m_abort_uncited(fs):
+        d = find(fs, kind="promotion.decided", subject="stage:payments/prod", ts="2026-09-02T11:33:05Z")
+        d["refs"] = []
+    check("mutation: an abort that cites no evidence is flagged as unevidenced, though its gate (carried before) passes", K2,
+          lambda db: one(db, "SELECT flag FROM v_audit_flag WHERE stage='payments/prod' AND freight='A231' AND ts='2026-09-02T11:33:05Z'")["flag"] == "no evidence cited",
+          m_abort_uncited)
+
+    def m_reapprove_a232(fs):
+        fs.append({"id": "m023", "ts": "2026-09-02T11:40:00Z", "class": "intent", "kind": "approval.granted", "subject": "stage:payments/prod",
+                   "actor": "user:dana", "payload": {"freight": "A232", "role": "payments-oncall", "via": "pulumi delivery approve payments/prod"}, "rationale": "retry storm fixed by config; try again"})
+    check("mutation: a fresh approval after the abort makes A232 ready again at prod", K2,
+          lambda db: grid(db, "payments/prod")["status"] == "ready", m_reapprove_a232)

@@ -406,3 +406,95 @@ screen still a SELECT over `facts`. What it cost the views, honestly:
     mind writes nothing that closes it; the candidate stays the requested
     freight until some decision lands. Cheap to add (`rollback.withdrawn`,
     or a request naming no freight); left out until a fixture wants it.
+
+## 2026-09-02 — the canary (multistack, Wednesday)
+
+**Still no second mutable table.** Both-live, a gate inside a transition, an
+automatic abort, and every screen a SELECT. What the canary cost, and what
+it settled:
+
+43. **A stage carries a set for as long as a transition is open.** `v_carried`
+    stayed what it was — the latest success — and `v_live` is the set:
+    carried (stable) plus in flight (canary), with the weight the executor
+    last reported. The grid's "carries" column did not need to change;
+    "live" is a second column. That is the cheapest reading of "a stack
+    should exist at two versions at once": the transition already held both
+    versions (the F417 ECS rollout's `both-live` phase said so on day one);
+    what was missing was a view that reads them out as a set with shares.
+
+44. **Conformance is against the enactment, not against intent.** The
+    first `v_observed` compared each observed value to the desired freight.
+    Inside the pause that reads the stable ReplicaSet (A231) as drift from
+    intent (A232) — false, and UNEXPLAINED, since no side-door fact exists.
+    It also reads a decided-but-not-enacted stage as drifted. `v_observed`
+    now compares to `v_live`: what the enactments say should be there. The
+    intent-vs-enactment gap is the grid's status column (pending, in-flight),
+    not drift. The pulumi-service checks held under the change: Monday's
+    api@F416 is drift either way, because F416 is neither carried nor in
+    flight.
+
+45. **The cutover is a gate inside the transition, and it is declared.** A
+    pause step carries terms in the stage-gate vocabulary, evaluated with
+    one more floor — facts recorded since this rollout started — so the
+    approval that opened the stage gate does not also promote the canary,
+    and an analysis from before the rollout does not count. This is the
+    "transitions as the blue/green primitive" position with something under
+    it: the executor pauses on an observation (`phase: paused, step: 1`)
+    and the ledger says what would let it continue. Two terms of six are
+    defined on a step (`verified`, `approved`, `not_held`); the rest name
+    stages, freight or plans a step has no business with — OPEN 4's terms
+    are typed by subject three ways now (stage, edge, step).
+
+46. **The step's declaration lives on the stage.** `strategy.steps` is a
+    payload on `stage.declared`, the first enactment detail to write a fact
+    (program.md said `enact:` writes none). It has to: "paused, awaiting X"
+    is meaningless without the declaration that says what X is. Whether the
+    strategy is the stage's or the executor's to declare is a real call;
+    here the stage owns it because the tracker reads it.
+
+47. **An abort is a reversal, and needs its own gate.** Intent returning to
+    the stable is a promotion to a freight older than the one decided —
+    `v_direction` now compares to *desired*, not to what is carried, so an
+    abort while the canary was never carried is the same relation as
+    Thursday's rollback. Under the forward gate the abort would fail (A231's
+    approval lapsed when A232 was decided — the rule from #33 biting
+    correctly, in the wrong direction); prod's rollback block (`auto`,
+    `previously_carried`) is what lets the policy write it with nobody
+    involved. The mutation that removes the block shows the audit flag.
+    Argo's `abort` needs no approval; here that is a policy choice the team
+    declares, not a property of aborts.
+
+48. **The decision-replay check must exclude the decision.** The
+    per-decision self-check built the ledger at the decision's own
+    timestamp — including the decision — so the abort read as *forward*
+    (desired already A231) and failed the wrong gate. The ledger "as it
+    stood when the decision was written" is everything up to that instant
+    except the decision itself, and both scenarios' harnesses now say so.
+    The audit view (`v_audit_ctx`) never had the problem: it reads the
+    previous decision's freight explicitly. Same "as of T" seam as #15,
+    one row sharper: inclusive and exclusive of the fact being judged are
+    different questions.
+
+49. **The abort's evidence is a verification that failed.** The failing
+    `canary-analysis` is an ordinary `verification.recorded` on (prod,
+    A232); the policy's decision cites it; nothing new was needed. What is
+    missing is the policy *trigger* as data — "on a failed step-gate
+    verification, decide the stable" is prose in the rollback block's
+    description, and the policy engine's business, as every trigger here
+    is.
+
+50. **Blue/green in pulumi-service was not built, on purpose.** The F417
+    ECS rollout's phases (provisioning → both-live → cutover → retiring)
+    are the same shape without weights or a declared pause; `v_live` reads
+    them as a set already (in flight, no weight), and `v_observed` would
+    accept either version during the window. Argo's shape has the pause
+    and the analysis, which is what exercises the step gate; ECS's does
+    not, today. One canary, aborted, was enough to bake or break the
+    position; a promoted one is a mutation check (`m_promote`), not a
+    story.
+
+51. **Pin-set re-pin was not modelled.** "Rollback of a pin-set = re-pin"
+    (threads) is a second `release.pinned` naming older members, and the
+    members then move under their own rollback blocks. Cheap, but this
+    week's story had no reason to unpin k8s 1.31; left for a fixture that
+    does.
