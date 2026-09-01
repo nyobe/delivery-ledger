@@ -89,6 +89,10 @@ SELECT f.subject                                    AS edge,
        json_extract(f.payload, '$.consumer_program') AS consumer_program,
        json_extract(f.payload, '$.producer_program') AS producer_program,
        json_extract(f.payload, '$.pattern')         AS pattern,
+       coalesce(json_extract(f.payload, '$.role'), 'instance') AS role,
+       json_extract(f.payload, '$.rule')            AS rule,
+       json_extract(f.payload, '$.safe')            AS safe_rule,
+       json_extract(f.payload, '$.environments')    AS environments,
        json_extract(f.payload, '$.description')     AS description,
        f.id AS fact
 FROM facts f
@@ -120,7 +124,7 @@ WHERE f.kind = 'freight.discovered';
 -- is in every later master build. `prs` on a freight lists what that build
 -- introduced. Keyed by warehouse — two programs' branches are two histories.
 CREATE VIEW v_membership AS
-SELECT later.freight,
+SELECT later.freight, later.warehouse,
        json_extract(pr.value, '$.number')           AS pr,
        json_extract(pr.value, '$.title')            AS title,
        json_extract(pr.value, '$.author')           AS author,
@@ -196,7 +200,15 @@ JOIN v_program_stack ps ON ps.program = s.program AND ps.stack = t.stack;
 -- Observation: what each (stage, stack) actually carries — the latest
 -- freight enactment on that stack that finished successfully.
 CREATE VIEW v_carried_stack AS
-SELECT t.stage, t.stack, t.freight, t.finished_at AS since, t.ops_update, t.transition, t.finished_fact AS fact
+SELECT t.stage, t.stack, t.freight,
+       -- since: the first success of this freight after the last success of any other
+       -- (an uptake re-enacting the same freight does not restart the clock)
+       (SELECT min(u.finished_at) FROM v_freight_transition u
+         WHERE u.stage = t.stage AND u.stack = t.stack AND u.outcome = 'succeeded' AND u.freight = t.freight
+           AND u.finished_seq > coalesce((SELECT max(v.finished_seq) FROM v_freight_transition v
+                                          WHERE v.stage = t.stage AND v.stack = t.stack AND v.outcome = 'succeeded'
+                                            AND v.freight IS NOT t.freight), 0)) AS since,
+       t.finished_at AS last_enacted_at, t.ops_update, t.transition, t.finished_fact AS fact
 FROM v_freight_transition t
 WHERE t.outcome = 'succeeded' AND t.freight IS NOT NULL
   AND t.finished_seq = (SELECT max(u.finished_seq) FROM v_freight_transition u
@@ -224,7 +236,8 @@ SELECT s.stage,
        last.ops_update, last.transition, last.fact,
        count(k.stack)                               AS n_stacks_carrying,
        n.n                                          AS n_stacks,
-       group_concat(k.stack || '@' || k.freight, ', ') AS stacks_detail
+       (SELECT group_concat(x, ', ') FROM (SELECT k2.stack || '@' || k2.freight AS x FROM v_carried_stack k2
+                                            WHERE k2.stage = s.stage ORDER BY k2.stack)) AS stacks_detail
 FROM v_stage s
 JOIN (SELECT program, count(*) AS n FROM v_program_stack GROUP BY program) n ON n.program = s.program
 JOIN v_carried_stack k ON k.stage = s.stage
@@ -260,7 +273,7 @@ WHERE f.kind = 'verification.recorded'
                  AND json_extract(g.payload, '$.freight') = json_extract(f.payload, '$.freight')
                  AND json_extract(g.payload, '$.check')   = json_extract(f.payload, '$.check'));
 
--- Every approval, with its role. Gates pick the latest matching one.
+-- Every stage approval, with its role. Gates pick the latest matching one.
 CREATE VIEW v_approval AS
 SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.freight')         AS freight,
@@ -268,7 +281,17 @@ SELECT substr(f.subject, 7)                         AS stage,
        json_extract(f.payload, '$.via')             AS via,
        f.actor, f.ts, f.seq, f.rationale, f.id AS fact
 FROM facts f
-WHERE f.kind = 'approval.granted';
+WHERE f.kind = 'approval.granted' AND f.subject LIKE 'stage:%';
+
+-- An approval on an edge: for taking up one record version.
+CREATE VIEW v_edge_approval AS
+SELECT f.subject                                    AS edge,
+       json_extract(f.payload, '$.record_version')  AS version,
+       json_extract(f.payload, '$.role')            AS role,
+       json_extract(f.payload, '$.via')             AS via,
+       f.actor, f.ts, f.seq, f.rationale, f.id AS fact
+FROM facts f
+WHERE f.kind = 'approval.granted' AND f.subject LIKE 'edge:%';
 
 -- Holds are intent facts with an expiry; "active" is relative to the clock.
 -- A stage may carry several; the gate sees one row per stage.
@@ -314,8 +337,10 @@ SELECT substr(f.subject, 7)                         AS stage,
        f.ts, f.id AS fact
 FROM facts f
 WHERE f.kind = 'plan.summarized'
+  AND json_extract(f.payload, '$.against_record') IS NULL
   AND f.seq = (SELECT max(g.seq) FROM facts g
                WHERE g.kind = f.kind AND g.subject = f.subject
+                 AND json_extract(g.payload, '$.against_record') IS NULL
                  AND json_extract(g.payload, '$.freight') = json_extract(f.payload, '$.freight'));
 
 -- Conformance reads: what a watch last saw running, compared to intent.
@@ -590,7 +615,10 @@ SELECT fr.freight, fr.release_pr, fr.cut_at, fr.discovered_at, s.stage, s.ord,
        THEN ge.awaiting END AS awaiting,
   CASE WHEN ge.freight = fr.freight AND ge.passes = 0 AND d.freight IS NOT fr.freight
        THEN ge.awaiting_since END AS awaiting_since,
-  (k.freight IS fr.freight) AS is_current
+  (k.freight IS fr.freight) AS is_current,
+  (SELECT count(*) FROM v_carried_stack k2 WHERE k2.stage = s.stage AND k2.freight = fr.freight) AS n_stacks_at,
+  (SELECT group_concat(x, ', ') FROM (SELECT k2.stack || '@' || k2.freight AS x FROM v_carried_stack k2
+                                       WHERE k2.stage = s.stage AND k2.freight = fr.freight ORDER BY k2.stack)) AS partial_detail
 FROM v_freight fr
 CROSS JOIN v_stage s
 LEFT JOIN v_gate_eval ge ON ge.stage = s.stage
@@ -604,12 +632,13 @@ SELECT b.*,
        WHEN b.awaiting IS NOT NULL        THEN 'awaiting'
        WHEN b.last_outcome = 'failed'     THEN 'failed'
        WHEN b.last_outcome = 'abandoned'  THEN 'superseded'
+       WHEN b.n_stacks_at > 0             THEN 'partial'
        ELSE 'none' END AS cell
 FROM v_lanes_base b;
 
 -- Where is my change: PR → every freight that contains it → lanes.
 CREATE VIEW v_trace AS
-SELECT m.pr, m.title, m.author, m.introduced_in, m.freight, fr.release_pr,
+SELECT m.warehouse, m.pr, m.title, m.author, m.introduced_in, m.freight, fr.release_pr,
        l.stage, l.ord, l.reached_at, l.inflight_since, l.awaiting, l.awaiting_since, l.is_current,
        l.last_outcome, l.last_outcome_at
 FROM v_membership m
@@ -618,17 +647,17 @@ JOIN v_lanes   l  ON l.freight  = m.freight;
 
 -- One cell per (PR, stage): the earliest freight that carried it there.
 CREATE VIEW v_trace_cell_base AS
-SELECT t.pr, t.stage, t.ord,
+SELECT t.warehouse, t.pr, t.stage, t.ord,
        min(t.reached_at) AS reached_at,
-       (SELECT t2.freight FROM v_trace t2 WHERE t2.pr = t.pr AND t2.stage = t.stage AND t2.reached_at IS NOT NULL
+       (SELECT t2.freight FROM v_trace t2 WHERE t2.warehouse = t.warehouse AND t2.pr = t.pr AND t2.stage = t.stage AND t2.reached_at IS NOT NULL
           ORDER BY t2.reached_at, t2.freight LIMIT 1) AS via,
        max(t.inflight_since) AS inflight_since,
-       (SELECT t2.awaiting FROM v_trace t2 WHERE t2.pr = t.pr AND t2.stage = t.stage AND t2.awaiting IS NOT NULL
+       (SELECT t2.awaiting FROM v_trace t2 WHERE t2.warehouse = t.warehouse AND t2.pr = t.pr AND t2.stage = t.stage AND t2.awaiting IS NOT NULL
           ORDER BY t2.awaiting_since, t2.freight LIMIT 1) AS awaiting,
-       (SELECT t2.last_outcome FROM v_trace t2 WHERE t2.pr = t.pr AND t2.stage = t.stage AND t2.last_outcome IS NOT NULL
+       (SELECT t2.last_outcome FROM v_trace t2 WHERE t2.warehouse = t.warehouse AND t2.pr = t.pr AND t2.stage = t.stage AND t2.last_outcome IS NOT NULL
           ORDER BY t2.last_outcome_at DESC, t2.freight DESC LIMIT 1) AS last_outcome
 FROM v_trace t
-GROUP BY t.pr, t.stage;
+GROUP BY t.warehouse, t.pr, t.stage;
 
 CREATE VIEW v_trace_cell AS
 SELECT b.*,
@@ -642,22 +671,23 @@ FROM v_trace_cell_base b;
 
 -- One line per PR: how far it got, via which freight, what it waits on next.
 CREATE VIEW v_trace_summary AS
-SELECT t.pr, t.title, t.author, t.introduced_in,
-  (SELECT c.stage FROM v_trace_cell c WHERE c.pr = t.pr AND c.reached_at IS NOT NULL ORDER BY c.ord DESC LIMIT 1) AS furthest_stage,
-  (SELECT c.reached_at FROM v_trace_cell c WHERE c.pr = t.pr AND c.reached_at IS NOT NULL ORDER BY c.ord DESC LIMIT 1) AS furthest_at,
-  (SELECT c.via FROM v_trace_cell c WHERE c.pr = t.pr AND c.reached_at IS NOT NULL ORDER BY c.ord DESC LIMIT 1) AS furthest_via,
+SELECT t.warehouse, t.pr, t.title, t.author, t.introduced_in,
+  (SELECT c.stage FROM v_trace_cell c WHERE c.warehouse = t.warehouse AND c.pr = t.pr AND c.reached_at IS NOT NULL ORDER BY c.ord DESC LIMIT 1) AS furthest_stage,
+  (SELECT c.reached_at FROM v_trace_cell c WHERE c.warehouse = t.warehouse AND c.pr = t.pr AND c.reached_at IS NOT NULL ORDER BY c.ord DESC LIMIT 1) AS furthest_at,
+  (SELECT c.via FROM v_trace_cell c WHERE c.warehouse = t.warehouse AND c.pr = t.pr AND c.reached_at IS NOT NULL ORDER BY c.ord DESC LIMIT 1) AS furthest_via,
   (SELECT c.stage || ': ' || c.awaiting FROM v_trace_cell c
-     WHERE c.pr = t.pr AND c.awaiting IS NOT NULL
-       AND c.ord > coalesce((SELECT max(c2.ord) FROM v_trace_cell c2 WHERE c2.pr = t.pr AND c2.reached_at IS NOT NULL), 0)
+     WHERE c.warehouse = t.warehouse AND c.pr = t.pr AND c.awaiting IS NOT NULL
+       AND c.ord > coalesce((SELECT max(c2.ord) FROM v_trace_cell c2 WHERE c2.warehouse = t.warehouse AND c2.pr = t.pr AND c2.reached_at IS NOT NULL), 0)
      ORDER BY c.ord LIMIT 1) AS next,
   -- the train it shipped in: the earliest cut freight that contains it
   (SELECT fr.release_pr FROM v_freight fr JOIN v_membership m2 ON m2.freight = fr.freight
-     WHERE m2.pr = t.pr AND fr.cut_at IS NOT NULL ORDER BY fr.cut_at LIMIT 1) AS shipped_in,
-  CASE WHEN NOT EXISTS (SELECT 1 FROM v_freight fr JOIN v_membership m2 ON m2.freight = fr.freight
-                         WHERE m2.pr = t.pr AND fr.cut_at IS NOT NULL)
+     WHERE m2.warehouse = t.warehouse AND m2.pr = t.pr AND fr.cut_at IS NOT NULL ORDER BY fr.cut_at LIMIT 1) AS shipped_in,
+  CASE WHEN EXISTS (SELECT 1 FROM v_freight fr2 WHERE fr2.warehouse = t.warehouse AND fr2.cut_at IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM v_freight fr JOIN v_membership m2 ON m2.freight = fr.freight
+                         WHERE m2.warehouse = t.warehouse AND m2.pr = t.pr AND fr.cut_at IS NOT NULL)
        THEN 'not in a release yet (next cut picks it up)' END AS note
 FROM v_trace t
-GROUP BY t.pr;
+GROUP BY t.warehouse, t.pr;
 
 -- Published output records: latest version per producer.
 CREATE VIEW v_record AS
@@ -674,15 +704,147 @@ WHERE f.kind = 'output.published'
 CREATE VIEW v_uptaken AS
 SELECT f.subject                                    AS edge,
        json_extract(f.payload, '$.record_version')  AS version,
+       json_extract(f.payload, '$.via')             AS via,
+       json_extract(f.payload, '$.pr')              AS pr,
        f.actor, f.ts, f.rationale, f.id AS fact
 FROM facts f
 WHERE f.kind = 'uptake.decided'
   AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);
 
--- Publication is evidence; uptake is intent. A pending uptake is the gap.
+-- Edge instances: the bindings that actually carry records (patterns are the
+-- per-program declarations they were expanded from). The consumer names a
+-- stack at a stage, `stack@stage`; a by-version pin names only the program.
+CREATE VIEW v_edge_instance AS
+SELECT e.*,
+       CASE WHEN instr(e.consumer, '@') > 0 THEN substr(e.consumer, instr(e.consumer, '@') + 1) END AS consumer_stage,
+       CASE WHEN instr(e.consumer, '@') > 0 THEN substr(e.consumer, 1, instr(e.consumer, '@') - 1) ELSE e.consumer END AS consumer_stack
+FROM v_edge e
+WHERE e.role = 'instance';
+
+CREATE VIEW v_edge_term AS
+SELECT e.edge,
+       t.key                                        AS idx,
+       json_extract(t.value, '$.type')              AS type,
+       json_extract(t.value, '$.role')              AS role,
+       json_extract(t.value, '$.via')               AS via
+FROM v_edge_instance e, json_each(e.terms) t;
+
+-- Hyper-previews: the consumer's plan against a proposed record, computed
+-- ahead of any uptake. Latest per (consumer stage, producer, version).
+CREATE VIEW v_record_plan AS
+SELECT substr(f.subject, 7)                         AS stage,
+       json_extract(f.payload, '$.freight')         AS freight,
+       json_extract(f.payload, '$.against_record.producer') AS producer,
+       json_extract(f.payload, '$.against_record.version')  AS version,
+       json_extract(f.payload, '$.create')          AS n_create,
+       json_extract(f.payload, '$.update')          AS n_update,
+       json_extract(f.payload, '$.delete')          AS n_delete,
+       json_extract(f.payload, '$.replace')         AS n_replace,
+       json_extract(f.payload, '$.note')            AS note,
+       CASE WHEN json_extract(f.payload, '$.delete') IS NULL
+              OR json_extract(f.payload, '$.replace') IS NULL
+              OR json_extract(f.payload, '$.migrations_changed') IS NULL THEN NULL
+            ELSE (json_extract(f.payload, '$.delete') = 0
+                  AND json_extract(f.payload, '$.replace') = 0
+                  AND NOT json_extract(f.payload, '$.migrations_changed')) END AS safe,
+       f.ts, f.id AS fact
+FROM facts f
+WHERE f.kind = 'plan.summarized'
+  AND json_extract(f.payload, '$.against_record') IS NOT NULL
+  AND f.seq = (SELECT max(g.seq) FROM facts g
+               WHERE g.kind = f.kind AND g.subject = f.subject
+                 AND json_extract(g.payload, '$.against_record.producer') = json_extract(f.payload, '$.against_record.producer')
+                 AND json_extract(g.payload, '$.against_record.version')  = json_extract(f.payload, '$.against_record.version'));
+
+-- Uptake is a promotion on the edge, so its gate is the same kind of thing as
+-- a stage's: typed terms, evaluated at rest against the latest published
+-- record. Only the term types that make sense on an edge are defined here —
+-- `verified` and `carried` name stages and freight, which an uptake has neither of.
+CREATE VIEW v_uptake_term AS
+SELECT e.edge, e.consumer_stage, r.version, t.idx, t.type, t.role,
+  CASE t.type
+    WHEN 'approved' THEN
+      (SELECT a.ts FROM v_edge_approval a WHERE a.edge = e.edge AND a.version = r.version AND a.role = t.role ORDER BY a.seq DESC LIMIT 1)
+    WHEN 'not_held' THEN
+      CASE WHEN NOT EXISTS (SELECT 1 FROM v_hold_active h WHERE h.stage = e.consumer_stage) THEN '' END
+    WHEN 'plan_safe_or_approved' THEN
+      coalesce((SELECT pl.ts FROM v_record_plan pl WHERE pl.stage = e.consumer_stage AND pl.producer = e.producer AND pl.version = r.version AND pl.safe = 1),
+               (SELECT a.ts FROM v_edge_approval a WHERE a.edge = e.edge AND a.version = r.version AND a.role = t.role ORDER BY a.seq DESC LIMIT 1))
+  END AS satisfied_at,
+  CASE t.type
+    WHEN 'approved'              THEN 'approved by ' || t.role || coalesce(' (' || t.via || ')', '')
+    WHEN 'not_held'              THEN 'no active hold on ' || e.consumer_stage
+    WHEN 'plan_safe_or_approved' THEN 'preview safe, or approved by ' || t.role
+    ELSE t.type || ' (not defined on an edge)'
+  END AS label,
+  CASE t.type
+    WHEN 'approved'              THEN 'approval: ' || t.role
+    WHEN 'not_held'              THEN 'hold until ' || (SELECT h.until_ts FROM v_hold_active h WHERE h.stage = e.consumer_stage)
+    WHEN 'plan_safe_or_approved' THEN
+      CASE WHEN NOT EXISTS (SELECT 1 FROM v_record_plan pl WHERE pl.stage = e.consumer_stage AND pl.producer = e.producer AND pl.version = r.version)
+           THEN 'preview of ' || e.consumer || ' against v' || r.version
+           ELSE 'approval: ' || t.role || ' (preview not safe)' END
+    ELSE t.type || ' is not defined on an edge'
+  END AS unmet_text,
+  CASE t.type
+    WHEN 'not_held'              THEN (SELECT h.placed_at FROM v_hold_active h WHERE h.stage = e.consumer_stage)
+    WHEN 'plan_safe_or_approved' THEN (SELECT pl.ts FROM v_record_plan pl WHERE pl.stage = e.consumer_stage AND pl.producer = e.producer AND pl.version = r.version)
+  END AS onset_at,
+  CASE t.type
+    WHEN 'plan_safe_or_approved' THEN
+      CASE WHEN EXISTS (SELECT 1 FROM v_record_plan pl WHERE pl.stage = e.consumer_stage AND pl.producer = e.producer AND pl.version = r.version AND pl.safe = 1) THEN 'auto'
+           WHEN EXISTS (SELECT 1 FROM v_edge_approval a WHERE a.edge = e.edge AND a.version = r.version AND a.role = t.role) THEN 'approved'
+           WHEN NOT EXISTS (SELECT 1 FROM v_record_plan pl WHERE pl.stage = e.consumer_stage AND pl.producer = e.producer AND pl.version = r.version) THEN 'no-plan'
+           ELSE 'open' END
+  END AS term_outcome,
+  CASE t.type
+    WHEN 'approved' THEN
+      (SELECT a.fact FROM v_edge_approval a WHERE a.edge = e.edge AND a.version = r.version AND a.role = t.role ORDER BY a.seq DESC LIMIT 1)
+    WHEN 'not_held' THEN
+      (SELECT h.facts FROM v_hold_active h WHERE h.stage = e.consumer_stage)
+    WHEN 'plan_safe_or_approved' THEN
+      coalesce((SELECT a.fact FROM v_edge_approval a WHERE a.edge = e.edge AND a.version = r.version AND a.role = t.role ORDER BY a.seq DESC LIMIT 1),
+               (SELECT pl.fact FROM v_record_plan pl WHERE pl.stage = e.consumer_stage AND pl.producer = e.producer AND pl.version = r.version))
+  END AS evidence_fact,
+  CASE t.type
+    WHEN 'approved' THEN
+      (SELECT a.actor || ' via ' || a.via FROM v_edge_approval a WHERE a.edge = e.edge AND a.version = r.version AND a.role = t.role ORDER BY a.seq DESC LIMIT 1)
+    WHEN 'not_held' THEN
+      (SELECT h.holders || ': ' || h.rationale FROM v_hold_active h WHERE h.stage = e.consumer_stage)
+    WHEN 'plan_safe_or_approved' THEN
+      (SELECT 'preview +' || pl.n_create || ' ~' || pl.n_update || ' −' || pl.n_delete || ' ±' || pl.n_replace
+              || CASE WHEN pl.safe = 1 THEN ' — safe' ELSE ' — not safe' END
+         FROM v_record_plan pl WHERE pl.stage = e.consumer_stage AND pl.producer = e.producer AND pl.version = r.version)
+  END AS evidence
+FROM v_edge_instance e
+JOIN v_record r ON r.producer = e.producer
+JOIN v_edge_term t ON t.edge = e.edge
+WHERE e.kind = 'by-reference';
+
+-- The uptake gate for each by-reference edge instance that declares terms,
+-- against the latest published record. An edge without terms has no gate here:
+-- its `uptake` mode says who decides, in prose.
+CREATE VIEW v_uptake_gate AS
+SELECT e.edge, r.version,
+  (SELECT count(*) FROM v_uptake_term g WHERE g.edge = e.edge AND g.version = r.version) AS n_terms,
+  (SELECT count(*) FROM v_uptake_term g WHERE g.edge = e.edge AND g.version = r.version AND g.satisfied_at IS NULL) AS n_unmet,
+  ((SELECT count(*) FROM v_uptake_term g WHERE g.edge = e.edge AND g.version = r.version AND g.satisfied_at IS NULL) = 0) AS passes,
+  (SELECT g.unmet_text FROM v_uptake_term g WHERE g.edge = e.edge AND g.version = r.version AND g.satisfied_at IS NULL ORDER BY g.idx LIMIT 1) AS awaiting,
+  (SELECT g.type FROM v_uptake_term g WHERE g.edge = e.edge AND g.version = r.version AND g.satisfied_at IS NULL ORDER BY g.idx LIMIT 1) AS awaiting_type,
+  max(coalesce((SELECT max(g.satisfied_at) FROM v_uptake_term g WHERE g.edge = e.edge AND g.version = r.version AND g.satisfied_at IS NOT NULL), ''),
+      coalesce((SELECT g.onset_at FROM v_uptake_term g WHERE g.edge = e.edge AND g.version = r.version AND g.satisfied_at IS NULL ORDER BY g.idx LIMIT 1), ''),
+      coalesce(r.ts, '')) AS gate_since
+FROM v_edge_instance e
+JOIN v_record r ON r.producer = e.producer
+WHERE e.kind = 'by-reference' AND e.terms IS NOT NULL;
+
+-- Publication is evidence; uptake is intent. A pending uptake is the gap —
+-- one row per by-reference edge instance, with its gate and the preview of
+-- the consumer against the proposed record when one has been computed.
 -- NULL pending = nothing has ever been published on this edge.
 CREATE VIEW v_pending_uptake AS
-SELECT e.consumer, e.producer, e.key, e.uptake AS policy,
+SELECT e.edge, e.consumer, e.consumer_stage, e.consumer_stack, e.producer, e.key, e.kind, e.uptake AS policy,
+       e.terms, e.rule, e.safe_rule, e.environment, e.consumer_program, e.producer_program, e.pattern,
        r.version                                              AS published_version,
        r.ts                                                   AS published_at,
        json_extract(r.payload, '$.values.' || e.key)          AS published_value,
@@ -690,14 +852,142 @@ SELECT e.consumer, e.producer, e.key, e.uptake AS policy,
        u.version                                              AS consumed_version,
        u.ts                                                   AS consumed_at,
        u.actor                                                AS consumed_by,
+       u.rationale                                            AS consumed_rationale,
+       u.fact                                                 AS consumed_fact,
        CASE WHEN r.version IS NULL THEN NULL
             ELSE (r.version > coalesce(u.version, 0)) END      AS pending,
-       'preview ' || e.consumer || ' with ' || e.key || ' = '
-         || json_extract(r.payload, '$.values.' || e.key)     AS preview,
+       g.n_terms, g.n_unmet, g.passes, g.awaiting, g.awaiting_type, g.gate_since,
+       pl.fact AS preview_fact, pl.ts AS preview_at, pl.freight AS preview_freight, pl.note AS preview_note,
+       pl.n_create AS p_create, pl.n_update AS p_update, pl.n_delete AS p_delete, pl.n_replace AS p_replace,
+       pl.safe AS preview_safe,
        e.description
-FROM v_edge e
+FROM v_edge_instance e
+LEFT JOIN v_record      r  ON r.producer = e.producer
+LEFT JOIN v_uptaken     u  ON u.edge = e.edge
+LEFT JOIN v_uptake_gate g  ON g.edge = e.edge AND g.version = r.version
+LEFT JOIN v_record_plan pl ON pl.stage = e.consumer_stage AND pl.producer = e.producer AND pl.version = r.version
+WHERE e.kind = 'by-reference';
+
+-- By-version bindings: the producer publishes a stage-invariant record; the
+-- consumer pins a version in its config, so the uptake is a config change
+-- (a PR) that rides the consumer's own freight through its ordinary gates.
+-- "Pending" here means published but not yet pinned; where the pin has got to
+-- is a lanes question (v_pin_stage).
+CREATE VIEW v_pin_uptake AS
+SELECT e.edge, e.consumer, e.consumer_program, e.producer, e.producer_program, e.key, e.uptake AS policy, e.description,
+       r.version                                              AS published_version,
+       r.ts                                                   AS published_at,
+       r.fact                                                 AS published_fact,
+       json_extract(r.payload, '$.values.' || e.key)          AS published_value,
+       json_extract(r.payload, '$.note')                      AS published_note,
+       u.version                                              AS pinned_version,
+       u.ts                                                   AS pinned_at,
+       u.actor                                                AS pinned_by,
+       u.via                                                  AS pinned_via,
+       u.pr                                                   AS pinned_pr,
+       u.fact                                                 AS pinned_fact,
+       (SELECT fr.freight FROM v_freight fr JOIN v_warehouse w ON w.name = fr.warehouse AND w.program = e.consumer_program
+         WHERE json_extract(fr.config, '$.' || e.key) = r.version ORDER BY fr.discovered_at, fr.seq LIMIT 1) AS pinned_in,
+       (SELECT fr.discovered_at FROM v_freight fr JOIN v_warehouse w ON w.name = fr.warehouse AND w.program = e.consumer_program
+         WHERE json_extract(fr.config, '$.' || e.key) = r.version ORDER BY fr.discovered_at, fr.seq LIMIT 1) AS pinned_in_at,
+       CASE WHEN r.version IS NULL THEN NULL
+            ELSE (r.version > coalesce(u.version, 0)) END      AS pending
+FROM v_edge_instance e
 LEFT JOIN v_record  r ON r.producer = e.producer
-LEFT JOIN v_uptaken u ON u.edge = e.edge;
+LEFT JOIN v_uptaken u ON u.edge = e.edge
+WHERE e.kind = 'by-version';
+
+-- Where the pin has got to: for each consumer stage, the pin its carried
+-- freight holds, and the lane cell of the freight that carries the new pin.
+CREATE VIEW v_pin_stage AS
+SELECT p.edge, p.key, p.published_version, p.pinned_in, s.stage, s.environment, s.ord,
+       k.freight                                    AS carried,
+       json_extract(fr.config, '$.' || p.key)       AS carried_pin,
+       l.cell, l.reached_at, l.awaiting, l.awaiting_since, l.inflight_since, l.last_outcome, l.last_outcome_at, l.is_current,
+       CASE WHEN p.published_version IS NULL                                        THEN 'nothing'
+            WHEN json_extract(fr.config, '$.' || p.key) = p.published_version       THEN 'current'
+            WHEN p.pinned_in IS NULL                                                THEN 'unpinned'
+            ELSE 'behind' END                       AS pin_state
+FROM v_pin_uptake p
+JOIN v_stage s ON s.program = p.consumer_program
+LEFT JOIN v_carried k  ON k.stage = s.stage
+LEFT JOIN v_freight fr ON fr.freight = k.freight
+LEFT JOIN v_lanes   l  ON l.stage = s.stage AND l.freight = p.pinned_in;
+
+-- Impact is a queue, not a feature: everything downstream of a producer along
+-- declared edges, transitively, with each edge's uptake state right now.
+CREATE VIEW v_impact AS
+WITH RECURSIVE down(root, node, edge, depth, path) AS (
+  SELECT DISTINCT e.producer, e.producer, NULL, 0, e.producer FROM v_edge_instance e
+  UNION ALL
+  SELECT d.root, e.consumer, e.edge, d.depth + 1, d.path || ' → ' || e.consumer
+  FROM down d JOIN v_edge_instance e ON e.producer = d.node
+  WHERE d.depth < 8 AND instr(d.path, e.consumer) = 0
+)
+SELECT d.root, d.node AS consumer, d.edge, d.depth, d.path,
+       e.kind, e.uptake AS policy, e.key, e.consumer_program, e.producer_program,
+       coalesce(pu.pending, pi.pending)             AS pending,
+       coalesce(pu.published_version, pi.published_version) AS published_version,
+       coalesce(pu.consumed_version, pi.pinned_version)     AS consumed_version,
+       pu.passes, pu.awaiting, pi.pinned_in
+FROM down d
+JOIN v_edge_instance e ON e.edge = d.edge
+LEFT JOIN v_pending_uptake pu ON pu.edge = d.edge
+LEFT JOIN v_pin_uptake     pi ON pi.edge = d.edge
+WHERE d.depth > 0;
+
+-- A pin-set (composite freight): one intent fact naming a member freight per
+-- program. Enactment is the members' own promotions under their own teams'
+-- policies; the pin-set only says which set is meant to be verified together.
+CREATE VIEW v_pinset AS
+SELECT substr(f.subject, 9)                         AS release,
+       json_extract(f.payload, '$.display')         AS display,
+       json_extract(f.payload, '$.members')         AS members,
+       json_extract(f.payload, '$.order')           AS ord,
+       f.ts AS pinned_at, f.actor AS pinned_by, f.rationale, f.id AS fact
+FROM facts f
+WHERE f.kind = 'release.pinned'
+  AND f.seq = (SELECT max(g.seq) FROM facts g WHERE g.kind = f.kind AND g.subject = f.subject);
+
+CREATE VIEW v_pinset_member AS
+SELECT p.release, je.key AS program, je.value AS freight
+FROM v_pinset p, json_each(p.members) je;
+
+-- Each member at each environment: the member program's stage there, whether it
+-- carries the pinned freight now, and the lane cell of that freight.
+CREATE VIEW v_pinset_env AS
+SELECT m.release, m.program, m.freight, s.environment, s.stage, s.ord,
+       (k.freight IS m.freight)                     AS carried_now,
+       (d.freight IS m.freight)                     AS desired_now,
+       l.cell, l.reached_at, l.awaiting, l.awaiting_since, l.inflight_since, l.last_outcome, l.last_outcome_at, l.is_current
+FROM v_pinset_member m
+JOIN v_stage s ON s.program = m.program
+LEFT JOIN v_lanes   l ON l.freight = m.freight AND l.stage = s.stage
+LEFT JOIN v_carried k ON k.stage = s.stage
+LEFT JOIN v_desired d ON d.stage = s.stage;
+
+CREATE VIEW v_pinset_status AS
+SELECT release, environment, min(ord) AS ord,
+       count(*)                                     AS members,
+       sum(carried_now)                             AS members_carried,
+       CASE WHEN sum(carried_now) = count(*) THEN 'complete'
+            WHEN sum(carried_now) > 0       THEN 'partial'
+            ELSE 'pending' END                      AS state,
+       CASE WHEN sum(carried_now) = count(*) THEN max(reached_at) END AS complete_at
+FROM v_pinset_env
+GROUP BY release, environment;
+
+-- The estate: program × environment, with what each stage is wired with (the
+-- record versions its by-reference edges have taken up) and how many uptakes
+-- wait on it.
+CREATE VIEW v_estate AS
+SELECT g.*,
+       (SELECT group_concat(x, ', ') FROM (SELECT pu.key || ' v' || pu.consumed_version AS x FROM v_pending_uptake pu
+                                            WHERE pu.consumer_stage = g.stage AND pu.consumed_version IS NOT NULL ORDER BY pu.key)) AS wired,
+       (SELECT count(*) FROM v_pending_uptake pu WHERE pu.consumer_stage = g.stage AND pu.pending = 1) AS pending_uptakes,
+       (SELECT count(*) FROM v_pending_uptake pu WHERE pu.producer = pu.producer
+          AND substr(pu.producer, instr(pu.producer, '@') + 1) = g.stage AND pu.pending = 1) AS pending_downstream
+FROM v_grid g;
 
 -- Past releases: Keith's release cards. The card itself is the cut freight;
 -- its per-stage cells come from v_release_stage, pivoted by the renderer over
@@ -746,6 +1036,7 @@ SELECT d.id AS decision, substr(d.subject, 7) AS stage, json_extract(d.payload, 
                           AND NOT json_extract(p.payload, '$.migrations_changed') THEN p.id END
            FROM facts p
           WHERE p.kind = 'plan.summarized' AND p.subject = d.subject
+            AND json_extract(p.payload, '$.against_record') IS NULL
             AND json_extract(p.payload, '$.freight') = json_extract(d.payload, '$.freight') AND p.ts <= d.ts
           ORDER BY p.seq DESC LIMIT 1),
         (SELECT a.fact FROM v_approval a
@@ -781,6 +1072,53 @@ SELECT d.*,
     WHEN d.n_refs = 0                THEN 'no evidence cited'
   END AS flag
 FROM v_audit_decision d;
+
+-- The same audit for uptake decisions: was every approval-bearing term of the
+-- edge's policy met, on record, at the instant the uptake was written?
+CREATE VIEW v_uptake_audit_term AS
+SELECT d.id AS decision, d.subject AS edge, json_extract(d.payload, '$.record_version') AS version, d.ts,
+       t.idx, t.type, t.role, e.consumer_stage, e.producer,
+  CASE t.type
+    WHEN 'approved' THEN
+      (SELECT a.fact FROM v_edge_approval a
+        WHERE a.edge = d.subject AND a.version = json_extract(d.payload, '$.record_version')
+          AND a.role = t.role AND a.ts <= d.ts ORDER BY a.seq DESC LIMIT 1)
+    WHEN 'plan_safe_or_approved' THEN
+      coalesce(
+        (SELECT CASE WHEN json_extract(p.payload, '$.delete') = 0 AND json_extract(p.payload, '$.replace') = 0
+                          AND NOT json_extract(p.payload, '$.migrations_changed') THEN p.id END
+           FROM facts p
+          WHERE p.kind = 'plan.summarized' AND p.subject = 'stage:' || e.consumer_stage
+            AND json_extract(p.payload, '$.against_record.producer') = e.producer
+            AND json_extract(p.payload, '$.against_record.version') = json_extract(d.payload, '$.record_version')
+            AND p.ts <= d.ts
+          ORDER BY p.seq DESC LIMIT 1),
+        (SELECT a.fact FROM v_edge_approval a
+          WHERE a.edge = d.subject AND a.version = json_extract(d.payload, '$.record_version')
+            AND a.role = t.role AND a.ts <= d.ts ORDER BY a.seq DESC LIMIT 1))
+  END AS satisfied_by,
+  CASE t.type WHEN 'approved' THEN 'approval: ' || t.role ELSE 'safe preview or approval: ' || t.role END AS requirement
+FROM facts d
+JOIN v_edge_instance e ON e.edge = d.subject
+JOIN v_edge_term t ON t.edge = d.subject AND t.type IN ('approved', 'plan_safe_or_approved')
+WHERE d.kind = 'uptake.decided';
+
+CREATE VIEW v_uptake_audit_flag AS
+SELECT d.subject AS edge, json_extract(d.payload, '$.record_version') AS version, d.ts, d.actor, d.rationale, d.id AS fact,
+       json_array_length(d.refs) AS n_refs, e.uptake AS mode, e.consumer,
+       (SELECT count(*) FROM v_uptake_audit_term x WHERE x.decision = d.id)                            AS n_required,
+       (SELECT count(*) FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NULL) AS n_unmet,
+       (SELECT group_concat(x.requirement, '; ') FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NULL) AS unmet,
+       (SELECT group_concat(x.satisfied_by, ' ') FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NOT NULL) AS evidence,
+  CASE
+    WHEN d.actor NOT LIKE 'policy:%' AND e.terms IS NOT NULL THEN 'decided by ' || d.actor || ' directly, not by the edge policy'
+    WHEN (SELECT count(*) FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NULL) > 0
+         THEN 'unmet at decision time: ' || (SELECT group_concat(x.requirement, '; ') FROM v_uptake_audit_term x WHERE x.decision = d.id AND x.satisfied_by IS NULL)
+    WHEN json_array_length(d.refs) = 0 THEN 'no evidence cited'
+  END AS flag
+FROM facts d
+JOIN v_edge_instance e ON e.edge = d.subject
+WHERE d.kind = 'uptake.decided';
 
 -- Every fact, tagged with the stage it belongs to (directly, or through its
 -- transition). The "what happened" view is this, filtered.

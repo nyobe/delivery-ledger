@@ -29,7 +29,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 INTENT_KINDS = {
     "warehouse.declared", "stage.declared", "policy.declared", "binding.declared", "release.cut",
-    "promotion.decided", "approval.granted", "hold.placed", "breakglass.recorded", "uptake.decided",
+    "release.pinned", "promotion.decided", "approval.granted", "hold.placed", "breakglass.recorded",
+    "uptake.decided",
 }
 OBSERVATION_KINDS = {
     "freight.discovered", "transition.started", "transition.phase", "transition.finished",
@@ -37,10 +38,10 @@ OBSERVATION_KINDS = {
     "output.published", "state.observed",
 }
 RATIONALE_REQUIRED = {
-    "release.cut", "promotion.decided", "approval.granted", "hold.placed",
+    "release.cut", "release.pinned", "promotion.decided", "approval.granted", "hold.placed",
     "breakglass.recorded", "uptake.decided",
 }
-SUBJECT_TYPES = {"warehouse", "stage", "freight", "transition", "edge", "record"}
+SUBJECT_TYPES = {"warehouse", "stage", "freight", "transition", "edge", "record", "release"}
 TRANSITION_OUTCOMES = {"succeeded", "failed", "abandoned"}
 PLAN_KEYS = {"create", "update", "delete", "replace", "migrations_changed"}
 # Derived states must never be written down. If a fact carries one of these,
@@ -153,6 +154,10 @@ def lint(facts):
         for key in ("freight", "from_freight", "to_freight"):
             if p.get(key) is not None and p[key] not in declared["freight"]:
                 err(i, f, f"payload.{key} {p[key]} is not a discovered freight")
+        if kind == "release.pinned":
+            for prog, fr in (p.get("members") or {}).items():
+                if fr not in declared["freight"]:
+                    err(i, f, f"pin-set member {prog}: {fr} is not a discovered freight")
 
         if kind == "plan.summarized" and not PLAN_KEYS <= set(p):
             err(i, f, f"plan.summarized lacks {sorted(PLAN_KEYS - set(p))} — the safe-rule reads them")
@@ -343,6 +348,8 @@ GLYPH = {
     "converged": ("●", "ok"), "awaiting": ("○", "amber"), "held": ("⊘", "hold"),
     "in-flight": ("◌", "live"), "failed": ("✕", "bad"), "ready": ("▸", "ok"),
     "pending": ("○", "hold"), "superseded": ("↷", "live"), "idle": ("·", "hold"),
+    "partial": ("◐", "amber"), "complete": ("●", "ok"),
+    "current": ("●", "ok"), "behind": ("○", "amber"), "unpinned": ("○", "hold"), "nothing": ("·", "hold"),
 }
 
 
@@ -382,6 +389,14 @@ def section(anchor, eyebrow, title, blurb, body, sql):
 # ---------------------------------------------------------------------------
 # Screens — each is driven by a query; no stage or freight is named in code
 # ---------------------------------------------------------------------------
+
+def programs(db):
+    """Programs in stage order, each with its stages — every per-program screen pivots over this."""
+    out = []
+    for r in q(db, "SELECT program, min(ord) AS o FROM v_stage GROUP BY program ORDER BY o"):
+        out.append((r["program"], [x["stage"] for x in q(db, "SELECT stage FROM v_stage WHERE program=? ORDER BY ord", r["program"])]))
+    return out
+
 
 def screen_grid(db, as_of):
     rows = []
@@ -437,6 +452,8 @@ def lane_cell(c, as_of, via=None):
         return f'<span class="reached">{esc(fmt_ts(c["reached_at"]))}</span>{extra}'
     if kind == "in-flight":
         return chip("in-flight", "in flight") + f'<div class="small muted">since {esc(fmt_ts(c["inflight_since"]))}</div>'
+    if kind == "partial":
+        return chip("partial") + f'<div class="small muted">{esc(c.get("partial_detail") or "")}</div>'
     if kind == "awaiting":
         since = f'<br><span class="muted">{esc(fmt_since(c["awaiting_since"], as_of))}</span>' if c.get("awaiting_since") else ""
         return chip("awaiting") + f'<div class="small">{esc(c["awaiting"])}{since}</div>'
@@ -447,26 +464,31 @@ def lane_cell(c, as_of, via=None):
 
 
 def screen_lanes(db, as_of):
-    stages = [r["stage"] for r in q(db, "SELECT stage FROM v_stage ORDER BY ord")]
-    freights = q(db, "SELECT DISTINCT freight, release_pr, cut_at, discovered_at FROM v_lanes ORDER BY discovered_at DESC")
     lanes = {(r["freight"], r["stage"]): r for r in q(db, "SELECT * FROM v_lanes")}
-    rows = []
-    for fr in freights:
-        label = f'<b>{esc(fr["freight"])}</b>'
-        label += (f'<div class="muted small">release PR #{esc(fr["release_pr"])} · cut {esc(fmt_ts(fr["cut_at"]))}</div>' if fr["release_pr"]
-                  else f'<div class="muted small">master build · {esc(fmt_ts(fr["discovered_at"]))} · no release yet</div>')
-        cells = [label]
-        for s in stages:
-            c = lanes[(fr["freight"], s)]
-            cells.append(lane_cell(c, as_of))
-        rows.append(cells)
-    body = table(["freight"] + stages, rows, "lanes")
-    return section("lanes", "1 · freight lanes", "Freight × stage",
-                   "Each freight runs through the stages it has reached; a cell is the time the enactment finished "
-                   "there, or what the freight is waiting on, or how its last attempt ended. Under content keying the "
-                   "build that ran in testing would <em>be</em> the release — today pulumi-service rebuilds per stage "
-                   "from the git SHA, so this lane is the thesis's construct, not yet the pipeline's.",
-                   body, sql_block(db, "v_lanes"))
+    progs = programs(db)
+    parts = []
+    for prog, stages in progs:
+        freights = q(db, "SELECT DISTINCT fr.freight, fr.release_pr, fr.cut_at, fr.discovered_at, fr.branch FROM v_freight fr "
+                         "JOIN v_warehouse w ON w.name = fr.warehouse WHERE w.program = ? ORDER BY fr.discovered_at DESC", prog)
+        rows = []
+        for fr in freights:
+            label = f'<b>{esc(fr["freight"])}</b>'
+            label += (f'<div class="muted small">release PR #{esc(fr["release_pr"])} · cut {esc(fmt_ts(fr["cut_at"]))}</div>' if fr["release_pr"]
+                      else f'<div class="muted small">{esc(fr["branch"])} build · {esc(fmt_ts(fr["discovered_at"]))}' + (" · no release yet" if len(progs) == 1 else "") + '</div>')
+            cells = [label]
+            for st in stages:
+                cells.append(lane_cell(lanes[(fr["freight"], st)], as_of))
+            rows.append(cells)
+        head = f'<h3>{esc(prog)}</h3>' if len(progs) > 1 else ""
+        parts.append(head + table(["freight"] + stages, rows, "lanes"))
+    blurb = ("Each freight runs through the stages it has reached; a cell is the time the enactment finished "
+             "there, or what the freight is waiting on, or how its last attempt ended. Under content keying the "
+             "build that ran in testing would <em>be</em> the release — today pulumi-service rebuilds per stage "
+             "from the git SHA, so this lane is the thesis's construct, not yet the pipeline's." if len(progs) == 1 else
+             "Each program's freight runs through that program's stages; a cell is the time the enactment finished "
+             "there on every one of the stage's stacks, <em>partial</em> when only some have, or what the freight "
+             "is waiting on, or how its last attempt ended.")
+    return section("lanes", "1 · freight lanes", "Freight × stage", blurb, "".join(parts), sql_block(db, "v_lanes"))
 
 
 def screen_gates(db, as_of):
@@ -505,35 +527,38 @@ def screen_gates(db, as_of):
 
 
 def screen_trace(db, as_of):
-    stages = [r["stage"] for r in q(db, "SELECT stage FROM v_stage ORDER BY ord")]
-    cells = {(r["pr"], r["stage"]): r for r in q(db, "SELECT * FROM v_trace_cell")}
-    rows = []
-    for s in q(db, "SELECT * FROM v_trace_summary ORDER BY pr DESC"):
-        line = f'<b>#{esc(s["pr"])}</b> {esc(s["title"])}<div class="muted small">{esc(s["author"])} · merged in {esc(s["introduced_in"])}'
-        line += f' · shipped in release PR #{esc(s["shipped_in"])}' if s["shipped_in"] else ""
-        line += "</div>"
-        if s["furthest_stage"]:
-            where = f'in <b>{esc(s["furthest_stage"])}</b> since {esc(fmt_ts(s["furthest_at"]))}'
-            if s["furthest_via"] != s["introduced_in"]:
-                where += f' <span class="muted">(via {esc(s["furthest_via"])})</span>'
-        else:
-            where = "nowhere yet"
-        if s["next"]:
-            where += f'<div class="small amber-text">next — {esc(s["next"])}</div>'
-        if s["note"]:
-            where += f'<div class="small muted">{esc(s["note"])}</div>'
-        row = [line, where]
-        for st in stages:
-            c = cells[(s["pr"], st)]
-            row.append(lane_cell(c, as_of, via=c["via"] if c["via"] and c["via"] != s["introduced_in"] else None))
-        rows.append(row)
-    body = table(["change", "where is it", *stages], rows, "trace")
+    cells = {(r["warehouse"], r["pr"], r["stage"]): r for r in q(db, "SELECT * FROM v_trace_cell")}
+    progs = programs(db)
+    parts = []
+    for prog, stages in progs:
+        rows = []
+        for s_ in q(db, "SELECT t.* FROM v_trace_summary t JOIN v_warehouse w ON w.name = t.warehouse WHERE w.program = ? ORDER BY t.pr DESC", prog):
+            line = f'<b>#{esc(s_["pr"])}</b> {esc(s_["title"])}<div class="muted small">{esc(s_["author"])} · merged in {esc(s_["introduced_in"])}'
+            line += f' · shipped in release PR #{esc(s_["shipped_in"])}' if s_["shipped_in"] else ""
+            line += "</div>"
+            if s_["furthest_stage"]:
+                where = f'in <b>{esc(s_["furthest_stage"])}</b> since {esc(fmt_ts(s_["furthest_at"]))}'
+                if s_["furthest_via"] != s_["introduced_in"]:
+                    where += f' <span class="muted">(via {esc(s_["furthest_via"])})</span>'
+            else:
+                where = "nowhere yet"
+            if s_["next"]:
+                where += f'<div class="small amber-text">next — {esc(s_["next"])}</div>'
+            if s_["note"]:
+                where += f'<div class="small muted">{esc(s_["note"])}</div>'
+            row = [line, where]
+            for st in stages:
+                c = cells[(s_["warehouse"], s_["pr"], st)]
+                row.append(lane_cell(c, as_of, via=c["via"] if c["via"] and c["via"] != s_["introduced_in"] else None))
+            rows.append(row)
+        head = f'<h3>{esc(prog)}</h3>' if len(progs) > 1 else ""
+        parts.append(head + table(["change", "where is it", *stages], rows, "trace"))
     return section("trace", "3 · where is my change", "PR → freight → stages",
                    "Keith's tracker reconstructs this by mining CI logs and commit subjects. Here it is a join: a "
-                   "freight names the PRs it introduced, membership is cumulative along master, the lanes say where "
-                   "each freight is. A PR merged after the cut is not <em>unreleased</em> — it is in testing, with a "
-                   "timestamp, because testing is a stage.",
-                   body, sql_block(db, "v_membership", "v_trace_cell", "v_trace_summary"))
+                   "freight names the PRs it introduced, membership is cumulative along its warehouse's branch, the "
+                   "lanes say where each freight is. A PR merged after the cut is not <em>unreleased</em> — it is in "
+                   "the first stage, with a timestamp, because that is a stage.",
+                   "".join(parts), sql_block(db, "v_membership", "v_trace_cell", "v_trace_summary"))
 
 
 def screen_diffgate(db, as_of):
@@ -575,31 +600,226 @@ def screen_diffgate(db, as_of):
                    "".join(parts), sql_block(db, "v_plan"))
 
 
+def plan_counts(r, prefix="p_"):
+    return f'+{esc(r[prefix + "create"])} ~{esc(r[prefix + "update"])} −{esc(r[prefix + "delete"])} ±{esc(r[prefix + "replace"])}'
+
+
 def screen_uptake(db, as_of):
     rows = []
-    for r in q(db, "SELECT * FROM v_pending_uptake ORDER BY consumer, key"):
+    for r in q(db, "SELECT * FROM v_pending_uptake ORDER BY consumer_program, environment, consumer, key"):
+        # what the consumer is wired with now, and what has been published
         if r["pending"] is None:
             state = '<span class="muted">nothing published yet</span>'
         elif r["pending"]:
-            state = (chip("awaiting", f'v{r["published_version"]} available, {r["policy"]}')
-                     + f'<div class="small">since {esc(fmt_ts(r["published_at"]))} · {esc(fmt_since(r["published_at"], as_of))} · '
-                       f'<a href="#" class="preview">{esc(r["preview"])}</a></div>')
+            if r["n_terms"] is not None:
+                if r["passes"]:
+                    state = chip("ready", f'v{r["published_version"]} available — gate passes') + '<div class="small">the policy has not written the uptake yet</div>'
+                else:
+                    state = (chip("awaiting", f'v{r["published_version"]} available, {r["policy"]}')
+                             + f'<div class="small">awaiting <b>{esc(r["awaiting"])}</b> · {esc(fmt_since(r["gate_since"], as_of))}</div>')
+            else:
+                state = (chip("awaiting", f'v{r["published_version"]} available, {r["policy"]}')
+                         + f'<div class="small">since {esc(fmt_ts(r["published_at"]))} · {esc(fmt_since(r["published_at"], as_of))} · a person decides</div>')
         else:
             who = "by policy" if str(r["consumed_by"]).startswith("policy:") else f'by {r["consumed_by"]}'
-            state = chip("converged", f'current at v{r["consumed_version"]}') + f'<div class="small muted">taken up {who} · {esc(fmt_ts(r["consumed_at"]))}</div>'
+            state = chip("converged", f'current at v{r["consumed_version"]}') + f'<div class="small muted">taken up {who} · {esc(fmt_ts(r["consumed_at"]))} {fact_ref(r["consumed_fact"])}</div>'
+        # the hyper-preview: the consumer's plan against the proposed record
+        if r["preview_fact"]:
+            preview = (f'{plan_counts(r)} {fact_ref(r["preview_fact"])}'
+                       + (chip("ready", "safe", "ok tiny") if r["preview_safe"] else chip("awaiting", "not safe", "amber tiny"))
+                       + f'<div class="small muted">{esc(r["preview_note"] or "")}</div>')
+        elif r["pending"]:
+            preview = f'<span class="muted">no preview computed for v{esc(r["published_version"])}</span>'
+        else:
+            preview = '<span class="muted">—</span>'
+        terms = ""
+        if r["n_terms"] is not None and r["pending"]:
+            trows = []
+            for t in q(db, "SELECT * FROM v_uptake_term WHERE edge=? AND version=? ORDER BY idx", r["edge"], r["published_version"]):
+                if t["satisfied_at"] is not None:
+                    trows.append(f'{chip("converged", "met", "ok tiny")} {esc(t["label"])} — {esc(t["evidence"] or "")} {fact_ref(t["evidence_fact"])}')
+                else:
+                    trows.append(f'{chip("awaiting", "open", "amber tiny")} {esc(t["label"])} — <span class="muted">{esc(t["unmet_text"])}</span>')
+            terms = '<div class="small">' + "<br>".join(trows) + "</div>"
+        pol = f'uptake <b>{esc(r["policy"])}</b>' + (f' · <code>{esc(r["rule"])}</code>' if r["rule"] and r["rule"] != "true" else "")
         rows.append([
-            f'<b>{esc(r["consumer"])}</b><div class="small muted">{esc(r["key"])} ← {esc(r["producer"])} · uptake <b>{esc(r["policy"])}</b></div>',
+            f'<b>{esc(r["consumer"])}</b><div class="small muted">{esc(r["key"])} ← {esc(r["producer"])}</div><div class="small muted">{pol}</div>',
             (f'v{esc(r["published_version"])} {mono(r["published_value"])}<div class="small muted">published {esc(fmt_ts(r["published_at"]))} {fact_ref(r["published_fact"])}</div>' if r["published_version"] is not None else '<span class="muted">—</span>'),
+            preview,
             (f'v{esc(r["consumed_version"])}<div class="small muted">{esc(fmt_ts(r["consumed_at"]))} · {esc(r["consumed_by"])}</div>' if r["consumed_version"] is not None else '<span class="muted">never</span>'),
-            state + f'<div class="small muted">{esc(r["description"])}</div>',
+            state + terms,
         ])
-    body = table(["consumer · binding", "published (evidence)", "taken up (intent)", "state"], rows)
+    body = table(["consumer · binding", "published (evidence)", "preview against it", "taken up (intent)", "state"], rows)
     n_pending = one(db, "SELECT count(*) AS n FROM v_pending_uptake WHERE pending = 1")["n"]
+
+    # by-version pins: published → pinned by a PR → riding the consumer's freight
+    pins = q(db, "SELECT * FROM v_pin_uptake ORDER BY consumer_program, key")
+    pin_html = ""
+    if pins:
+        prows = []
+        stages_by_prog = dict(programs(db))
+        for pn in pins:
+            stages = stages_by_prog.get(pn["consumer_program"], [])
+            where = {r["stage"]: r for r in q(db, "SELECT * FROM v_pin_stage WHERE edge=? ORDER BY ord", pn["edge"])}
+            if pn["published_version"] is None:
+                pinned = '<span class="muted">nothing published yet</span>'
+            elif pn["pending"]:
+                pinned = chip("awaiting", f'v{pn["published_version"]} published, not pinned') + f'<div class="small muted">since {esc(fmt_ts(pn["published_at"]))} · {esc(fmt_since(pn["published_at"], as_of))}</div>'
+            else:
+                pinned = (chip("converged", f'pinned v{pn["pinned_version"]}')
+                          + f'<div class="small muted">{esc(pn["pinned_by"])} · {esc(pn["pinned_via"] or "")} · {esc(fmt_ts(pn["pinned_at"]))} {fact_ref(pn["pinned_fact"])}</div>'
+                          + (f'<div class="small muted">in freight {mono(pn["pinned_in"])} · {esc(fmt_ts(pn["pinned_in_at"]))}</div>' if pn["pinned_in"] else '<div class="small muted">no freight carries the pin yet</div>'))
+            row = [f'<b>{esc(pn["consumer"])}</b><div class="small muted">{esc(pn["key"])} ← {esc(pn["producer"])} · by-version · uptake <b>{esc(pn["policy"])}</b></div>',
+                   (f'v{esc(pn["published_version"])} {mono(pn["published_value"])}<div class="small muted">published {esc(fmt_ts(pn["published_at"]))} {fact_ref(pn["published_fact"])}</div>'
+                    + (f'<div class="small muted">{esc(pn["published_note"])}</div>' if pn["published_note"] else "")) if pn["published_version"] is not None else '<span class="muted">—</span>',
+                   pinned]
+            for st in stages:
+                w = where.get(st)
+                if not w:
+                    row.append('<span class="muted">—</span>')
+                    continue
+                cell = chip(w["pin_state"], f'pin v{w["carried_pin"]}' if w["carried_pin"] is not None else w["pin_state"], None if w["pin_state"] != "behind" else "amber")
+                if w["pin_state"] == "behind" and w["cell"] and w["cell"] != "none":
+                    cell += f'<div class="small">{mono(w["pinned_in"])} · ' + lane_cell(w, as_of) + "</div>"
+                elif w["carried"]:
+                    cell += f'<div class="small muted">carries {esc(w["carried"])}</div>'
+                row.append(cell)
+            prows.append(row)
+        pin_html = ('<h3>By version: the pin rides the consumer\'s train</h3>'
+                    '<p class="lede">The producer publishes a stage-invariant record; the consumer pins a version in its config. '
+                    'The uptake is that config change — here a bot PR that auto-merges on green checks — and from then on '
+                    'it is ordinary freight, meeting every stage\'s gates on the way. "Pending" means published but not pinned; '
+                    '"where is v41" is a lanes question.</p>'
+                    + table(["consumer · binding", "published (evidence)", "pinned (intent)", *stages], prows))
     return section("uptake", "5 · uptake, gated and auto", f'Publication is evidence; uptake is intent — {n_pending} pending',
-                   "Each binding declares its uptake policy. On a gated edge a new record renders as <em>available, "
-                   "gated</em> with a preview until someone decides; on an auto edge the policy writes the uptake "
-                   "decision the moment the producer publishes. Blast radius is <code>consumers WHERE pending</code>.",
-                   body, sql_block(db, "v_pending_uptake", "v_record", "v_uptaken"))
+                   "Each binding declares its uptake policy, and a by-reference edge's gate is the same kind of thing as "
+                   "a stage's: typed terms evaluated at rest against the latest published record. A new record renders "
+                   "as <em>available</em> with the consumer's preview against it — the plan is a fact, so the gate can "
+                   "read it before anyone decides — until the policy (or a person) writes the uptake. Blast radius is "
+                   "<code>consumers WHERE pending</code>.",
+                   body + pin_html, sql_block(db, "v_pending_uptake", "v_uptake_term", "v_record_plan", "v_pin_uptake", "v_pin_stage"))
+
+
+def screen_estate(db, as_of):
+    progs = programs(db)
+    if len(progs) < 2:
+        return ""
+    envs = [r["environment"] for r in q(db, "SELECT environment, min(ord) AS o FROM v_stage GROUP BY environment ORDER BY o")]
+    cells = {(r["program"], r["environment"]): r for r in q(db, "SELECT * FROM v_estate")}
+    rows = []
+    for prog, _ in progs:
+        row = [f'<b>{esc(prog)}</b><div class="small muted">{esc(one(db, "SELECT owner FROM v_stage WHERE program=? LIMIT 1", prog)["owner"])}</div>']
+        for env in envs:
+            r = cells.get((prog, env))
+            if not r:
+                row.append('<span class="muted">—</span>')
+                continue
+            st = r["status"]
+            body = chip(st)
+            if r["carried"]:
+                body += f' {mono(r["carried"])}'
+            elif r["stacks_detail"]:
+                body += f'<div class="small muted">{esc(r["stacks_detail"])}</div>'
+            if st in ("awaiting", "held"):
+                body += f'<div class="small">{esc(r["awaiting"])} · {esc(fmt_since(r["awaiting_since"], as_of))}</div>'
+            elif st == "in-flight":
+                body += f'<div class="small">{mono(r["inflight_freight"])}' + (f' · {esc(r["last_phase"])}' if r["last_phase"] else "") + "</div>"
+            elif st == "failed":
+                body += f'<div class="small bad-text">{esc((r["last_error"] or "")[:80])}</div>'
+            if r["wired"]:
+                body += f'<div class="small muted">wired: {esc(r["wired"])}</div>'
+            if r["pending_uptakes"]:
+                body += f'<div class="small amber-text">{esc(r["pending_uptakes"])} uptake pending here</div>'
+            if r["pending_downstream"]:
+                body += f'<div class="small amber-text">{esc(r["pending_downstream"])} downstream uptake pending</div>'
+            row.append(body)
+        rows.append(row)
+    return section("estate", "the org graph is a query", "Programs × environments",
+                   "No program owns this grid. Each team declared its own stages and the edges into them; the "
+                   "estate view is assembled by joining subjects across programs on their <code>environment</code>. "
+                   "<em>Wired</em> is the version vector of records each stage has taken up — what it is actually "
+                   "running against, as data.",
+                   table(["program", *envs], rows), sql_block(db, "v_estate"))
+
+
+def screen_pinset(db, as_of):
+    pinsets = q(db, "SELECT * FROM v_pinset ORDER BY pinned_at DESC")
+    if not pinsets:
+        return ""
+    envs = [r["environment"] for r in q(db, "SELECT environment, min(ord) AS o FROM v_stage GROUP BY environment ORDER BY o")]
+    parts, heads = [], []
+    for ps in pinsets:
+        members = q(db, "SELECT * FROM v_pinset_member WHERE release=? ORDER BY program", ps["release"])
+        order = json.loads(ps["ord"]) if ps["ord"] else [m["program"] for m in members]
+        status = {r["environment"]: r for r in q(db, "SELECT * FROM v_pinset_status WHERE release=?", ps["release"])}
+        env_rows = {(r["program"], r["environment"]): r for r in q(db, "SELECT * FROM v_pinset_env WHERE release=?", ps["release"])}
+        rows = []
+        for prog in order:
+            m = next(x for x in members if x["program"] == prog)
+            row = [f'<b>{esc(prog)}</b> {mono(m["freight"])}']
+            for env in envs:
+                r = env_rows.get((prog, env))
+                if not r:
+                    row.append('<span class="muted">—</span>')
+                    continue
+                cell = lane_cell(r, as_of)
+                if r["cell"] == "reached" and not r["carried_now"]:
+                    cell += '<div class="small muted">no longer carried</div>'
+                row.append(cell)
+            rows.append(row)
+        srow = ['<b>pin-set</b>']
+        for env in envs:
+            r = status.get(env)
+            if not r:
+                srow.append('<span class="muted">—</span>')
+                continue
+            c = chip(r["state"], f'{r["state"]} {r["members_carried"]}/{r["members"]}')
+            if r["complete_at"]:
+                c += f'<div class="small muted">since {esc(fmt_ts(r["complete_at"]))}</div>'
+            srow.append(c)
+        rows.append(srow)
+        done = [e for e in envs if status.get(e) and status[e]["state"] == "complete"]
+        heads.append(f'{ps["display"] or ps["release"]}: complete in {", ".join(done) if done else "no environment yet"}')
+        parts.append(f'<h3>{esc(ps["display"] or ps["release"])} <span class="muted">· pinned {esc(fmt_ts(ps["pinned_at"]))} by {esc(ps["pinned_by"])} {fact_ref(ps["fact"])}</span></h3>'
+                     f'<p class="lede">members in order: {" → ".join(esc(o) for o in order)}<br><span class="muted">{esc(ps["rationale"] or "")}</span></p>'
+                     + table(["member", *envs], rows))
+    return section("pinset", "composite freight", " · ".join(esc(h) for h in heads),
+                   "A pin-set is one intent fact naming a member freight per program — a proposal that these ship "
+                   "together. It has no enactment of its own: each member moves under its owning team's policy, and "
+                   "the pin-set's state per environment is a join over the members' lanes. Values are never pinned "
+                   "across stages — each environment enacts the same pair against its own world.",
+                   "".join(parts), sql_block(db, "v_pinset", "v_pinset_env", "v_pinset_status"))
+
+
+def screen_impact(db, as_of):
+    roots = q(db, "SELECT DISTINCT root FROM v_impact ORDER BY root")
+    if not roots:
+        return ""
+    parts = []
+    for rt in roots:
+        rows = []
+        for r in q(db, "SELECT * FROM v_impact WHERE root=? ORDER BY depth, consumer", rt["root"]):
+            if r["pending"] is None:
+                state = '<span class="muted">nothing published</span>'
+            elif r["pending"]:
+                if r["kind"] == "by-version":
+                    state = chip("awaiting", f'v{r["published_version"]} not pinned')
+                elif r["passes"] is None:
+                    state = chip("awaiting", f'v{r["published_version"]} pending, {r["policy"]}')
+                elif r["passes"]:
+                    state = chip("ready", f'v{r["published_version"]} gate passes')
+                else:
+                    state = chip("awaiting", f'v{r["published_version"]} pending') + f'<div class="small">{esc(r["awaiting"])}</div>'
+            else:
+                state = chip("converged", f'current at v{r["consumed_version"]}') + (f'<div class="small muted">in {mono(r["pinned_in"])}</div>' if r["pinned_in"] else "")
+            rows.append([esc(r["depth"]), f'<b>{esc(r["consumer"])}</b><div class="small muted">{esc(r["path"])}</div>',
+                         f'{esc(r["key"])} · {esc(r["kind"])} · uptake <b>{esc(r["policy"])}</b>', state])
+        parts.append(f'<h3>if <code>{esc(rt["root"])}</code> publishes</h3>' + table(["hop", "downstream", "edge", "right now"], rows))
+    return section("impact", "impact analysis is a queue", "What is downstream, and what is waiting",
+                   "Tyler's question — \"if I change my stack, how does it affect downstream?\" — is the reverse index over "
+                   "binding facts, transitively. Because wiring is data, the answer is a query; because uptake is intent, "
+                   "each hop shows whether the last publication has been taken up, waits on a gate, or waits on a pin.",
+                   "".join(parts), sql_block(db, "v_impact"))
 
 
 def screen_outofband(db, as_of):
@@ -636,27 +856,35 @@ def screen_outofband(db, as_of):
 
 
 def screen_releases(db, as_of):
-    stages = [r["stage"] for r in q(db, "SELECT stage FROM v_stage ORDER BY ord")]
+    releases = q(db, "SELECT * FROM v_releases")
+    if not releases:
+        return ""
     cells = {(r["freight"], r["stage"]): r for r in q(db, "SELECT * FROM v_release_stage")}
-    rows = []
-    for r in q(db, "SELECT * FROM v_releases"):
-        row = [f'<b>{esc(r["freight"])}</b><div class="small muted">PR #{esc(r["release_pr"])} · {esc(r["release_branch"])} · {esc(r["sha"])}</div>'
-               f'<div class="small muted">{esc(r["prs"])} PRs: {esc(r["pr_list"])}</div>',
-               esc(fmt_ts(r["cut_at"]))]
-        for st in stages:
-            c = cells[(r["freight"], st)]
-            cell = lane_cell(c, as_of)
-            if c["approvable"]:
-                cell = (f'<div class="small">approved by {esc(c["approved_by"])} · {esc(fmt_ts(c["approved_at"]))}</div>' if c["approved_at"]
-                        else '<div class="small muted">no approval</div>') + cell
-            row.append(cell)
-        rows.append(row)
-    body = table(["release", "cut", *stages], rows)
+    progs = programs(db)
+    parts = []
+    for prog, stages in progs:
+        rows = []
+        for r in q(db, "SELECT r.* FROM v_releases r JOIN v_freight fr ON fr.freight = r.freight JOIN v_warehouse w ON w.name = fr.warehouse "
+                       "WHERE w.program = ? ORDER BY r.cut_at DESC", prog):
+            row = [f'<b>{esc(r["freight"])}</b><div class="small muted">PR #{esc(r["release_pr"])} · {esc(r["release_branch"])} · {esc(r["sha"])}</div>'
+                   f'<div class="small muted">{esc(r["prs"])} PRs: {esc(r["pr_list"])}</div>',
+                   esc(fmt_ts(r["cut_at"]))]
+            for st in stages:
+                c = cells[(r["freight"], st)]
+                cell = lane_cell(c, as_of)
+                if c["approvable"]:
+                    cell = (f'<div class="small">approved by {esc(c["approved_by"])} · {esc(fmt_ts(c["approved_at"]))}</div>' if c["approved_at"]
+                            else '<div class="small muted">no approval</div>') + cell
+                row.append(cell)
+            rows.append(row)
+        if rows:
+            head = f'<h3>{esc(prog)}</h3>' if len(progs) > 1 else ""
+            parts.append(head + table(["release", "cut", *stages], rows))
     return section("releases", "Keith parity", "Release trains",
                    "The past-releases cards: cut, then per stage the approval on record (where the stage's policy has "
                    "an approval term) and when the release landed there; shipping which PRs (those introduced since "
                    "the previous cut). One query over lanes, approvals and membership.",
-                   body, sql_block(db, "v_releases", "v_release_stage", "v_release_prs"))
+                   "".join(parts), sql_block(db, "v_releases", "v_release_stage", "v_release_prs"))
 
 
 def screen_transitions(db, as_of):
@@ -704,14 +932,32 @@ def screen_audit(db, as_of):
                      approvals, esc(d["n_refs"]),
                      (f'<span class="chip bad"><span class="glyph">⚠</span>{esc(d["flag"])}</span>' if d["flag"] else chip("converged", "clean")),
                      fact_ref(d["fact"])])
-    n_flag = one(db, "SELECT count(*) AS n FROM v_audit_flag WHERE flag IS NOT NULL")["n"]
+    urows = []
+    for d in q(db, "SELECT * FROM v_uptake_audit_flag ORDER BY (flag IS NULL), ts DESC"):
+        if d["n_required"] == 0:
+            approvals = '<span class="muted">none required</span>'
+        else:
+            approvals = f'{esc(d["n_required"] - d["n_unmet"])}/{esc(d["n_required"])} met ' + fact_ref(d["evidence"])
+            if d["unmet"]:
+                approvals += f'<div class="small bad-text">unmet: {esc(d["unmet"])}</div>'
+        urows.append([esc(fmt_ts(d["ts"])), f'<b>{esc(d["consumer"])}</b> ← v{esc(d["version"])}<div class="small muted">uptake {esc(d["mode"])}</div>', esc(d["actor"]),
+                      approvals, esc(d["n_refs"]),
+                      (f'<span class="chip bad"><span class="glyph">⚠</span>{esc(d["flag"])}</span>' if d["flag"] else chip("converged", "clean")),
+                      fact_ref(d["fact"])])
+    uptake_html = ""
+    if urows:
+        uptake_html = ('<h3>Uptake decisions</h3><p class="lede">The same check on every uptake written on an edge: by the policy, with the '
+                       'edge\'s approval-bearing terms met on record at that instant, citing evidence.</p>'
+                       + table(["when", "uptake", "written by", "approval terms at decision time", "refs", "audit", "fact"], urows))
+    n_flag = (one(db, "SELECT count(*) AS n FROM v_audit_flag WHERE flag IS NOT NULL")["n"]
+              + one(db, "SELECT count(*) AS n FROM v_uptake_audit_flag WHERE flag IS NOT NULL")["n"])
     return section("audit", "the ledger records what it is told", f'Decision audit — {n_flag} flagged',
                    "Every promotion decision, checked against the policy that should have written it: was it written "
                    "by the stage's policy; was every approval-bearing term (an approval, or a safe plan) on record "
                    "when it was written; did it cite evidence? An unauthorised or unevidenced decision is still a "
                    "fact — this is how it stays distinguishable from a legitimate one.",
-                   table(["when", "decision", "written by", "approval terms at decision time", "refs", "audit", "fact"], rows),
-                   sql_block(db, "v_audit_term", "v_audit_decision", "v_audit_flag"))
+                   table(["when", "decision", "written by", "approval terms at decision time", "refs", "audit", "fact"], rows) + uptake_html,
+                   sql_block(db, "v_audit_term", "v_audit_decision", "v_audit_flag", "v_uptake_audit_term", "v_uptake_audit_flag"))
 
 
 def screen_ledger(db, as_of):
@@ -727,8 +973,8 @@ def screen_ledger(db, as_of):
                    '<details class="sql"><summary>the table</summary><pre>' + esc(open(os.path.join(HERE, "schema.sql")).read()) + "</pre></details>")
 
 
-SCREENS = [screen_grid, screen_lanes, screen_gates, screen_trace, screen_diffgate, screen_uptake,
-           screen_outofband, screen_releases, screen_transitions, screen_audit, screen_ledger]
+SCREENS = [screen_grid, screen_estate, screen_lanes, screen_gates, screen_trace, screen_diffgate, screen_uptake,
+           screen_pinset, screen_impact, screen_outofband, screen_releases, screen_transitions, screen_audit, screen_ledger]
 
 
 # ---------------------------------------------------------------------------
